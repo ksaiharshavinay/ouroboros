@@ -99,10 +99,20 @@ class OuroInferenceEngine:
     def _llm_predict(self, prompt: str, max_new_tokens: int) -> str:
         """Call the configured LLM API and return the generated text."""
         try:
-            from ouro.claude_adapter import ClaudeAdapter
+            provider = getattr(self.config, "llm_provider", "claude").lower()
 
-            api_key = os.environ.get(self.config.llm_api_key_env, "")
-            client = ClaudeAdapter(api_key=api_key, model=self.config.llm_model)
+            if provider == "ollama":
+                from ouro.ollama_adapter import OllamaAdapter, OLLAMA_BASE_URL
+
+                base_url = getattr(self.config, "llm_base_url", OLLAMA_BASE_URL)
+                client = OllamaAdapter(model=self.config.llm_model, base_url=base_url)
+            else:
+                # Default: Anthropic Claude
+                from ouro.claude_adapter import ClaudeAdapter
+
+                api_key = os.environ.get(self.config.llm_api_key_env, "")
+                client = ClaudeAdapter(api_key=api_key, model=self.config.llm_model)
+
             response = client.chat.completions.create(
                 model=self.config.llm_model,
                 messages=[{"role": "user", "content": prompt}],

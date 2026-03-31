@@ -12,9 +12,11 @@ class OuroConfig:
     """Central configuration for the OUROBOROS pipeline."""
 
     # --- LLM / API ---
-    llm_model: str = "claude-haiku-4-5"
-    llm_base_url: str = "https://api.anthropic.com/v1"
-    llm_api_key_env: str = "ANTHROPIC_API_KEY"   # name of the env-var, not the key itself
+    # Provider: "claude" (default) or "ollama" (local)
+    llm_provider: str = "ollama"
+    llm_model: str = "llama3.2"          # set to "claude-haiku-4-5" when using claude
+    llm_base_url: str = "http://localhost:11434/v1"   # Ollama endpoint; change for Claude
+    llm_api_key_env: str = "ANTHROPIC_API_KEY"   # only used when llm_provider="claude"
 
     # --- Swarm simulation ---
     num_agents: int = 500

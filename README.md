@@ -32,7 +32,7 @@ The core novel mechanism: **the model's own prediction outputs feed back as new 
 |-----------|---------|---------|
 | Swarm simulation | OASIS (camel-ai) | Apache 2.0 |
 | Knowledge graph | KuzuDB 0.7.x | MIT |
-| LLM inference | Anthropic SDK | MIT |
+| LLM inference | Ollama (local) / Anthropic SDK | MIT |
 | Training loop | Custom (AutoResearch-inspired) | Proprietary |
 
 ---
@@ -44,7 +44,8 @@ The core novel mechanism: **the model's own prediction outputs feed back as new 
 - **`pipeline.py`** — Orchestrates all three stages (`OuroPipeline`)
 - **`feedback.py`** — Recursive feedback loop, persisted to disk (`OuroFeedbackModule`)
 - **`infer.py`** — Inference engine with tiktoken tokenisation (`OuroInferenceEngine`)
-- **`claude_adapter.py`** — Drop-in adapter wrapping the Anthropic SDK behind an OpenAI-compatible interface
+- **`ollama_adapter.py`** — Adapter for local Ollama models (default, free)
+- **`claude_adapter.py`** — Adapter for Anthropic Claude (optional, paid)
 
 ### `swarm/` — Swarm simulation engine
 - **`generator.py`** — Full pipeline: graph → personas → OASIS → corpus → report
@@ -66,43 +67,51 @@ python3 scripts/3_infer.py           # Stage 3: inference + feedback
 
 ---
 
-## Quickstart
+## Quickstart (Ollama — Free, Local, No API Key)
+
+The default backend is **Ollama**, which runs entirely on your machine at no cost.
 
 ### Requirements
 
 - Python 3.10–3.12 (3.12 recommended)
-- An [Anthropic API key](https://console.anthropic.com/settings/keys) with available credits
+- [Ollama](https://ollama.com) installed and running
 
-### 1. Clone the repo
+### 1. Install Ollama and pull the model
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/ouroboros.git
+# Install Ollama from https://ollama.com/download, then:
+ollama pull llama3.2
+```
+
+### 2. Clone the repo
+
+```bash
+git clone https://github.com/ksaiharshavinay/ouroboros.git
 cd ouroboros
 ```
 
-### 2. Install dependencies
+### 3. Install Python dependencies
 
 ```bash
-python3 -m pip install anthropic "kuzu==0.7.1" tiktoken openai
+python3 -m pip install openai "kuzu==0.7.1" tiktoken anthropic
 ```
 
 > Note: `camel-oasis` (the full swarm engine) requires Python < 3.12. On Python 3.12 the pipeline
 > automatically falls back to a stub simulation. Full OASIS support requires Python 3.10 or 3.11.
 
-### 3. Configure environment
+### 4. Verify config (Ollama is already the default)
 
-```bash
-cp .env.example .env
-# Open .env and set your ANTHROPIC_API_KEY
+Open `ouro/config.py` and confirm:
+
+```python
+llm_provider: str = "ollama"
+llm_model: str = "llama3.2"
+llm_base_url: str = "http://localhost:11434/v1"
 ```
 
-Your `.env` should look like:
+No `.env` file or API key needed.
 
-```
-ANTHROPIC_API_KEY=sk-ant-api03-...
-```
-
-### 4. Add a seed document
+### 5. Add a seed document
 
 Drop any `.txt` or `.md` file into `data/seeds/`. This is the starting knowledge the swarm will simulate around. Example:
 
@@ -120,12 +129,9 @@ algorithmic transparency. The key actors — Meta, ByteDance, X, and independent
 EOF
 ```
 
-### 5. Run the full loop
+### 6. Run the full loop
 
 ```bash
-# Export your API key (or load from .env with a tool like direnv)
-export ANTHROPIC_API_KEY=sk-ant-api03-...
-
 # Stage 1: Swarm simulation — extracts entities, generates personas, runs simulation
 python3 scripts/1_run_swarm.py --agents 10 --rounds 5
 
@@ -136,39 +142,60 @@ python3 scripts/2_run_research.py
 python3 scripts/3_infer.py --from-disk
 ```
 
-### 6. Repeat (self-reinforcing loop)
+### 7. Repeat (self-reinforcing loop)
 
 Each run of Stage 1 automatically picks up `data/seeds/feedback_cycle_NNNN.txt` written by the previous Stage 3. The loop is self-reinforcing — each cycle's predictions shape the next cycle's simulation.
 
 ```bash
-# Cycle 2
+# Cycle 2, 3, 4 ... same three commands every time
 python3 scripts/1_run_swarm.py --agents 10 --rounds 5
 python3 scripts/2_run_research.py
 python3 scripts/3_infer.py --from-disk
-
-# Cycle 3, 4, ... same commands
 ```
 
 ---
 
-## Sample Run
+## Using Claude Instead of Ollama (Optional)
+
+If you want to use Anthropic Claude instead of a local model, update `ouro/config.py`:
+
+```python
+llm_provider: str = "claude"
+llm_model: str = "claude-haiku-4-5"   # or claude-sonnet-4-6 / claude-opus-4-6
+llm_base_url: str = "https://api.anthropic.com/v1"
+llm_api_key_env: str = "ANTHROPIC_API_KEY"
+```
+
+Then set your API key:
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-api03-...
+```
+
+No other changes needed — the pipeline switches automatically.
+
+---
+
+## Sample Run (Ollama / llama3.2)
 
 Below is a real end-to-end run using `data/seeds/seed1.txt` (the AI in social networks seed above).
 
 ### Stage 1 output
 ```
+INFO: HTTP Request: POST http://localhost:11434/v1/chat/completions "HTTP/1.1 200 OK"
+
 === Swarm Complete ===
   Agents:     10
   Turns:      50
-  Corpus:     data/corpus/corpus_cycle_0000.jsonl
-  Cycle:      0
+  Corpus:     data/corpus/corpus_cycle_0001.jsonl
+  Cycle:      1
 
   Report preview:
-  # Social Simulation Analysis Report
+  **Structured Prediction Report**
 
-  ## 1. Observe: Dominant Themes
-  Initial Universal Engagement (Round 0): All 10 agents simultaneously observe trends,
-  indicating synchronized information flow typical of breaking-news events...
+  Initial observations suggest that agent 4 and agent 9 exhibit consistent behavior,
+  reporting trends in rounds 0, 2 and 4. This consistency suggests a pattern of
+  synchronized information flow...
 ```
 
 ### Stage 2 output
@@ -179,20 +206,24 @@ INFO: Corpus prepared: 45 train / 4 eval
 === Training Complete === Return code: 0
 ```
 
-### Stage 3 output (written to `data/seeds/feedback_cycle_0000.txt`)
+### Stage 3 output (written to `data/seeds/feedback_cycle_0001.txt`)
 ```
-# Forward-Looking Report: AI Agents in Social Networks — 2026 Outlook
+**Forward-Looking Report: The Evolving Landscape of AI Agents in Social Networks**
 
-The simulation revealed sustained influence concentration among two dominant actors
-(Agents 4 and 9), each maintaining 0.40 influence across all cycles. This persistent
-duopoly suggests incumbent platforms are consolidating power rather than fragmenting.
+Key emerging trends:
+1. Increased polarization and echo chambers — AI recommendation systems are exacerbating
+   political polarization by amplifying extreme content and creating filter bubbles.
+2. Rising concerns over AI-driven influence operations — state and non-state actors will
+   increasingly deploy AI agents to manipulate public opinion.
+3. Growing demand for AI-free feed options — users are pushing back against addictive
+   AI-driven recommendation engines.
 
-Prediction: Major platforms will implement transparency measures that satisfy regulators
-while preserving core engagement-optimization logic in hidden layers — creating the
-appearance of reform while maintaining algorithmic dominance.
+Prediction: Decentralized social networks will gain traction as users become disillusioned
+with centralized platforms, and regulatory frameworks will face a cat-and-mouse game
+with rapidly evolving AI capabilities.
 ```
 
-This output becomes the seed for Cycle 1, and so on.
+This output becomes the seed for the next cycle automatically.
 
 ---
 
@@ -243,19 +274,12 @@ All settings live in `ouro/config.py` as an `OuroConfig` dataclass. Key fields:
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `llm_model` | `claude-haiku-4-5` | Claude model to use |
-| `llm_api_key_env` | `ANTHROPIC_API_KEY` | Environment variable name for the API key |
+| `llm_provider` | `ollama` | Backend: `ollama` (local, free) or `claude` (Anthropic) |
+| `llm_model` | `llama3.2` | Model name (Ollama model or Claude model ID) |
+| `llm_base_url` | `http://localhost:11434/v1` | Ollama endpoint; change for Claude |
 | `num_agents` | 500 | Default agent count (override with `--agents`) |
 | `simulation_rounds` | 30 | Default rounds (override with `--rounds`) |
 | `max_feedback_cycles` | 10 | Maximum auto-feedback cycles |
-
-To use a more powerful model, change `llm_model` in `config.py`:
-
-```python
-llm_model: str = "claude-opus-4-6"   # Most capable
-llm_model: str = "claude-sonnet-4-6" # Balanced
-llm_model: str = "claude-haiku-4-5"  # Fastest / cheapest (default)
-```
 
 ---
 

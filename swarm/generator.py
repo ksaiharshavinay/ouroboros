@@ -173,7 +173,12 @@ class OuroborosSwarmGenerator(BaseSwarmAdapter):
         from ouro.claude_adapter import ClaudeAdapter
 
         api_key = os.environ.get(self.config.llm_api_key_env, "")
-        return ClaudeAdapter(api_key=api_key, model=self.config.llm_model)
+        return ClaudeAdapter(
+            api_key=api_key,
+            model=self.config.llm_model,
+            provider=self.config.llm_provider,
+            base_url=self.config.llm_base_url,
+        )
 
     @staticmethod
     def _run_async(coro: Any) -> Any:

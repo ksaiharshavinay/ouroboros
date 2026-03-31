@@ -27,7 +27,22 @@
       "Bash(gh auth:*)",
       "Bash(git --version)",
       "Bash(git -C \"/Users/saiharshavinaykudikala/Library/Mobile Documents/com~apple~CloudDocs/OUROBOROS\" status)",
-      "Bash(\"/Users/saiharshavinaykudikala/Library/Mobile Documents/com~apple~CloudDocs/OUROBOROS/.gitignore\":*)"
+      "Bash(\"/Users/saiharshavinaykudikala/Library/Mobile Documents/com~apple~CloudDocs/OUROBOROS/.gitignore\":*)",
+      "Bash(brew install:*)",
+      "Bash(curl -sL https://github.com/cli/cli/releases/download/v2.62.0/gh_2.62.0_macOS_arm64.tar.gz -o /tmp/gh.tar.gz)",
+      "Bash(tar -xzf /tmp/gh.tar.gz -C /tmp)",
+      "Bash(sudo mv:*)",
+      "Bash(gh --version)",
+      "Bash(curl -L \"https://github.com/cli/cli/releases/download/v2.62.0/gh_2.62.0_macOS_arm64.zip\" -o /tmp/gh.zip)",
+      "Bash(unzip -q /tmp/gh.zip -d /tmp/gh_pkg)",
+      "Read(//tmp/**)",
+      "Bash(mkdir -p ~/bin)",
+      "Bash(cp /tmp/gh_pkg/gh_2.62.0_macOS_arm64/bin/gh ~/bin/gh)",
+      "Bash(chmod +x ~/bin/gh)",
+      "Bash(~/bin/gh --version)",
+      "Bash(~/bin/gh auth:*)",
+      "Bash(~/bin/gh repo:*)",
+      "Bash(curl -s http://localhost:11434/api/tags)"
     ]
   }
 }
