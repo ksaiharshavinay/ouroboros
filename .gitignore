@@ -18,6 +18,7 @@ data/ouro_state.json
 data/last_cycle.json
 data/research_log.jsonl
 data/seeds/feedback_cycle_*.txt
+data/seeds/seed_ccl_rca.txt
 
 # Keep the seeds directory itself
 !data/seeds/.gitkeep
