@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "ouroboros-ai"
+version = "0.1.0"
+description = "Self-improving AI via recursive swarm-simulation feedback loops. PATENT PENDING."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Proprietary — All Rights Reserved" }
+authors = [
+  { name = "Sai Harsha Vinaykudikala", email = "ksaiharsha32@gmail.com" }
+]
+keywords = ["ai", "swarm", "self-improving", "automl", "agents"]
+
+dependencies = [
+  "openai>=1.0",
+  "kuzu>=0.3",
+  "tiktoken>=0.6",
+]
+
+[project.optional-dependencies]
+swarm = ["camel-oasis>=0.1"]
+dev = [
+  "pytest>=8.0",
+  "pytest-asyncio>=0.23",
+  "pytest-cov>=5.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.coverage.run]
+source = ["ouro", "swarm", "autoresearch"]
+omit = ["tests/*", "scripts/*"]
+
+[tool.coverage.report]
+fail_under = 80

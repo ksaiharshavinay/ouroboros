@@ -1,0 +1,26 @@
+# Environment
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+
+# Generated data (not source)
+data/corpus/
+data/model/
+data/kuzu_graph/
+data/ouro_state.json
+data/last_cycle.json
+data/research_log.jsonl
+data/seeds/feedback_cycle_*.txt
+
+# Keep the seeds directory itself
+!data/seeds/.gitkeep
+
+# OS
+.DS_Store

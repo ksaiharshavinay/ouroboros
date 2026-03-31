@@ -1,0 +1,33 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pip3 show:*)",
+      "Bash(python3.10 --version)",
+      "Bash(python3.11 --version)",
+      "Bash(python3.12 --version)",
+      "Bash(python3.13 --version)",
+      "Bash(pip install:*)",
+      "Bash(python3 -m pip install openai kuzu tiktoken)",
+      "Bash(python3 -m pip install camel-oasis)",
+      "Bash(\"/Users/saiharshavinaykudikala/Library/Mobile Documents/com~apple~CloudDocs/OUROBOROS/data/seeds/seed1.txt\")",
+      "Bash(python3 scripts/1_run_swarm.py)",
+      "Bash(python3 -m pip install \"kuzu==0.4.2\")",
+      "Bash(python3 -m pip index versions kuzu)",
+      "Bash(python3 -m pip install \"kuzu==0.7.1\")",
+      "Bash(python3 -c \":*)",
+      "Bash(export OPENAI_API_KEY=\"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\")",
+      "Bash(rm -rf data/kuzu_graph)",
+      "Bash(python3 scripts/1_run_swarm.py --agents 10 --rounds 5)",
+      "Skill(claude-api)",
+      "Skill(claude-api:*)",
+      "Bash(python3 -m pip install anthropic)",
+      "Bash(export ANTHROPIC_API_KEY=\"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\")",
+      "Bash(python3 scripts/2_run_research.py)",
+      "Bash(python3 scripts/3_infer.py)",
+      "Bash(gh auth:*)",
+      "Bash(git --version)",
+      "Bash(git -C \"/Users/saiharshavinaykudikala/Library/Mobile Documents/com~apple~CloudDocs/OUROBOROS\" status)",
+      "Bash(\"/Users/saiharshavinaykudikala/Library/Mobile Documents/com~apple~CloudDocs/OUROBOROS/.gitignore\":*)"
+    ]
+  }
+}

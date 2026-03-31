@@ -1,0 +1,29 @@
+version: "3.9"
+
+services:
+  ouroboros:
+    build: .
+    image: ouroboros-ai:latest
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+    volumes:
+      - ./data:/app/data          # persist corpus, model, kuzu graph
+      - ./data/seeds:/app/data/seeds
+    working_dir: /app
+    command: python scripts/1_run_swarm.py
+
+  # Run all three stages in sequence
+  ouroboros-full:
+    build: .
+    image: ouroboros-ai:latest
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+    volumes:
+      - ./data:/app/data
+    working_dir: /app
+    command: >
+      bash -c "
+        python scripts/1_run_swarm.py &&
+        python scripts/2_run_research.py &&
+        python scripts/3_infer.py
+      "
