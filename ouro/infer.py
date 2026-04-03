@@ -1,5 +1,5 @@
 # OUROBOROS — ouro/infer.py
-# Copyright (c) 2026 Sai Harsha Vinaykudikala. All rights reserved.
+# Copyright (c) 2026 Kudikala Sai Harsha Vinay. All rights reserved.
 # PATENT PENDING
 
 from __future__ import annotations
@@ -72,12 +72,17 @@ class OuroInferenceEngine:
     # Inference
     # ------------------------------------------------------------------
 
-    def predict(self, prompt: str, max_new_tokens: int = 512) -> str:
+    def predict(self, prompt: str, max_new_tokens: int = 512, context: str | None = None) -> str:
         """
         Run inference on the given prompt.
 
         If a fine-tuned model checkpoint is available, it is used; otherwise
         the method falls back to the configured LLM API.
+
+        Args:
+            prompt: The user-facing inference prompt.
+            max_new_tokens: Maximum tokens to generate.
+            context: Optional corpus/simulation text to inject as system context.
         """
         if not self._is_ready:
             self.load()
@@ -94,9 +99,9 @@ class OuroInferenceEngine:
 
         # --- Use base LLM API as inference backend ---
         # Replace this block with your fine-tuned model when ready.
-        return self._llm_predict(prompt, max_new_tokens)
+        return self._llm_predict(prompt, max_new_tokens, context=context)
 
-    def _llm_predict(self, prompt: str, max_new_tokens: int) -> str:
+    def _llm_predict(self, prompt: str, max_new_tokens: int, context: str | None = None) -> str:
         """Call the configured LLM API and return the generated text."""
         try:
             provider = getattr(self.config, "llm_provider", "claude").lower()
@@ -113,9 +118,14 @@ class OuroInferenceEngine:
                 api_key = os.environ.get(self.config.llm_api_key_env, "")
                 client = ClaudeAdapter(api_key=api_key, model=self.config.llm_model)
 
+            messages: list[dict] = []
+            if context:
+                messages.append({"role": "system", "content": context})
+            messages.append({"role": "user", "content": prompt})
+
             response = client.chat.completions.create(
                 model=self.config.llm_model,
-                messages=[{"role": "user", "content": prompt}],
+                messages=messages,
                 max_tokens=max_new_tokens,
                 temperature=0.7,
             )

@@ -1,5 +1,5 @@
 # OUROBOROS — swarm/generator.py
-# Copyright (c) 2026 Sai Harsha Vinaykudikala. All rights reserved.
+# Copyright (c) 2026 Kudikala Sai Harsha Vinay. All rights reserved.
 # PATENT PENDING
 #
 # Swarm generator built on:
@@ -91,6 +91,7 @@ class OuroborosSwarmGenerator(BaseSwarmAdapter):
             "num_turns": len(turns),
             "corpus_path": str(corpus_path),
             "cycle": cycle,
+            "report": self._last_report,
             "report_preview": self._last_report[:300],
         }
         logger.info("[swarm] Cycle %d complete — %d turns", cycle, len(turns))

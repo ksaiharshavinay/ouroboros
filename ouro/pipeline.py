@@ -1,5 +1,5 @@
 # OUROBOROS — ouro/pipeline.py
-# Copyright (c) 2026 Sai Harsha Vinaykudikala. All rights reserved.
+# Copyright (c) 2026 Kudikala Sai Harsha Vinay. All rights reserved.
 # PATENT PENDING
 
 from __future__ import annotations
@@ -105,7 +105,7 @@ class OuroPipeline:
             logger.warning("[ouro] No trained model yet; skipping inference & feedback.")
             return sim_result, research_result, Path()
 
-        prediction = self.infer.predict(prompt)
+        prediction = self.infer.predict(prompt, context=self._load_corpus_context(sim_result))
         seed_path = self.feedback.run_feedback(prediction, sim_result)
 
         # Persist full cycle metadata to disk
@@ -117,10 +117,62 @@ class OuroPipeline:
         logger.info("[ouro] Full cycle %d complete.", self.feedback.cycle_count - 1)
         return sim_result, research_result, seed_path
 
+    def _load_corpus_context(self, sim_result: dict[str, Any]) -> str | None:
+        """
+        Build a system context string for inference grounded in simulation output.
+        Prefers the LLM-generated prediction report (richest signal); falls back
+        to raw corpus turns if the report is unavailable.
+        """
+        # Prefer the full LLM-generated report — much richer than raw stub turns
+        report = sim_result.get("report", "").strip()
+        if report:
+            logger.info("[ouro] Injecting prediction report as inference context.")
+            return (
+                "You are synthesising results from an OUROBOROS swarm simulation.\n"
+                "Below is the prediction report generated from the latest simulation cycle.\n"
+                "Use it to answer the user's question with specific observations, "
+                "trends, and forward-looking predictions grounded in the simulation.\n\n"
+                "--- SIMULATION REPORT ---\n"
+                + report
+                + "\n--- END REPORT ---"
+            )
+
+        # Fallback: load raw corpus turns
+        corpus_path = sim_result.get("corpus_path")
+        if not corpus_path or not Path(corpus_path).exists():
+            return None
+        try:
+            lines = Path(corpus_path).read_text(encoding="utf-8").splitlines()
+            turns: list[str] = []
+            for line in lines[:60]:
+                try:
+                    obj = json.loads(line)
+                    content = obj.get("content") or obj.get("message") or ""
+                    if content:
+                        turns.append(content)
+                except (json.JSONDecodeError, AttributeError):
+                    continue
+            if not turns:
+                return None
+            logger.info("[ouro] Injecting %d corpus turns as inference context.", len(turns))
+            return (
+                "You are synthesising results from an OUROBOROS swarm simulation. "
+                "Below are agent interaction turns from the simulation corpus. "
+                "Use this data to answer the user's question with specific observations, "
+                "trends, and predictions grounded in the simulation output.\n\n"
+                "--- SIMULATION CORPUS (excerpt) ---\n"
+                + "\n".join(f"[Turn {i+1}] {t}" for i, t in enumerate(turns))
+                + "\n--- END CORPUS ---"
+            )
+        except Exception as exc:
+            logger.warning("[ouro] Could not load corpus for context: %s", exc)
+            return None
+
     def run_feedback_from_disk(self, prompt: str = "Summarize the predictions.") -> Path:
         """
         Run only the inference + feedback stage, loading sim_result from the
-        last persisted cycle state on disk.
+        last persisted cycle state on disk. The corpus from the last cycle is
+        injected as system context so the model synthesises real simulation data.
         """
         state_path = self.config.feedback_state_path.parent / "last_cycle.json"
         if not state_path.exists():
@@ -131,5 +183,6 @@ class OuroPipeline:
             state = json.load(f)
 
         sim_result = state.get("sim_result", {})
-        prediction = self.infer.predict(prompt)
+        context = self._load_corpus_context(sim_result)
+        prediction = self.infer.predict(prompt, context=context)
         return self.feedback.run_feedback(prediction, sim_result)
