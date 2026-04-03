@@ -8,7 +8,7 @@ Until then, all rights are reserved. Do not distribute this code publicly.
 
 ## Apache License, Version 2.0
 
-Copyright 2026 Sai Harsha Vinaykudikala
+Copyright 2026 Kudikala Sai Harsha Vinay
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.

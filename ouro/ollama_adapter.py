@@ -2,7 +2,7 @@
 # Drop-in adapter that talks to a locally running Ollama instance
 # via its OpenAI-compatible API (http://localhost:11434/v1).
 #
-# Copyright (c) 2026 Sai Harsha Vinaykudikala. All rights reserved.
+# Copyright (c) 2026 Kudikala Sai Harsha Vinay. All rights reserved.
 # PATENT PENDING
 
 from __future__ import annotations

@@ -1,5 +1,5 @@
 # OUROBOROS — Self-consuming feedback loop AI system
-# Copyright (c) 2026 Sai Harsha Vinaykudikala. All rights reserved.
+# Copyright (c) 2026 Kudikala Sai Harsha Vinay. All rights reserved.
 # PATENT PENDING
 
 from .pipeline import OuroPipeline

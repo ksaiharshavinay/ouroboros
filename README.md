@@ -2,7 +2,7 @@
 
 > *The serpent that consumes its own tail — endlessly regenerating.*
 
-**PATENT PENDING** | © 2026 Sai Harsha Vinaykudikala. All rights reserved.
+**PATENT PENDING** | © 2026 Kudikala Sai Harsha Vinay. All rights reserved.
 
 ---
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # OUROBOROS — autoresearch/train.py
-# Copyright (c) 2026 Sai Harsha Vinaykudikala. All rights reserved.
+# Copyright (c) 2026 Kudikala Sai Harsha Vinay. All rights reserved.
 # PATENT PENDING
 #
 # AutoResearch training loop — the AI agent modifies this file, runs it for
