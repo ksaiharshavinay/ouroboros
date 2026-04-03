@@ -1,5 +1,5 @@
 # OUROBOROS — swarm/graph.py
-# Copyright (c) 2026 Sai Harsha Vinaykudikala. All rights reserved.
+# Copyright (c) 2026 Kudikala Sai Harsha Vinay. All rights reserved.
 # PATENT PENDING
 #
 # KuzuDB (MIT licensed) — graph persistence for agent knowledge networks.
@@ -85,8 +85,13 @@ class GraphBuilder:
     def _llm_extract(self, text: str) -> list[dict[str, str]]:
         """Ask the LLM to extract named entities from text. Retries once on parse failure."""
         prompt = (
-            "Extract named entities (people, organisations, concepts) from the text below. "
-            "Return ONLY a JSON array: [{\"name\": \"...\", \"type\": \"...\"}]\n\n" + text[:3000]
+            "Extract named entities (people, organisations, concepts) from the text below.\n"
+            "Rules:\n"
+            "- Output ONLY a valid JSON array, nothing else.\n"
+            "- No markdown, no code fences, no explanation before or after.\n"
+            "- Format: [{\"name\": \"EntityName\", \"type\": \"person|organisation|concept\"}]\n"
+            "- If no entities found, output: []\n\n"
+            "Text:\n" + text[:3000]
         )
         for attempt in range(2):
             try:
@@ -97,16 +102,67 @@ class GraphBuilder:
                     max_tokens=512,
                 )
                 raw = response.choices[0].message.content or "[]"
-                # Strip ```json ... ``` fences robustly
-                raw = re.sub(r"^```(?:json)?\s*", "", raw.strip(), flags=re.IGNORECASE)
-                raw = re.sub(r"\s*```$", "", raw.strip())
-                return json.loads(raw)
-            except (json.JSONDecodeError, Exception) as exc:
+                entities = self._parse_entity_response(raw)
+                if entities is not None:
+                    return entities
                 if attempt == 0:
-                    logger.warning("[graph] Entity parse failed (%s); retrying at temp=0.", exc)
+                    logger.warning("[graph] Entity parse failed; retrying at temp=0.")
                 else:
-                    logger.error("[graph] Entity extraction failed after retry: %s", exc)
+                    logger.error("[graph] Entity extraction failed after retry; using empty list.")
+            except Exception as exc:
+                if attempt == 0:
+                    logger.warning("[graph] Entity extraction error (%s); retrying.", exc)
+                else:
+                    logger.error("[graph] Entity extraction error after retry: %s", exc)
         return []
+
+    @staticmethod
+    def _parse_entity_response(raw: str) -> list[dict[str, str]] | None:
+        """
+        Robustly parse an entity JSON array from a raw LLM response.
+
+        Handles:
+        - Markdown code fences (```json ... ```)
+        - Leading/trailing prose around the JSON array
+        - Individual objects extracted via regex when array parse fails
+        Returns None if no valid entities could be extracted.
+        """
+        # 1. Strip code fences
+        text = re.sub(r"```(?:json)?\s*", "", raw.strip(), flags=re.IGNORECASE)
+        text = re.sub(r"```", "", text).strip()
+
+        # 2. Try parsing the whole thing as JSON
+        try:
+            result = json.loads(text)
+            if isinstance(result, list):
+                return [e for e in result if isinstance(e, dict) and e.get("name")]
+        except json.JSONDecodeError:
+            pass
+
+        # 3. Find the first [...] block anywhere in the response
+        array_match = re.search(r"\[.*?\]", text, re.DOTALL)
+        if array_match:
+            try:
+                result = json.loads(array_match.group())
+                if isinstance(result, list):
+                    return [e for e in result if isinstance(e, dict) and e.get("name")]
+            except json.JSONDecodeError:
+                pass
+
+        # 4. Fallback: extract individual {"name": ..., "type": ...} objects via regex
+        objects = re.findall(r'\{[^{}]*"name"\s*:\s*"[^"]+[^{}]*\}', text)
+        entities = []
+        for obj_str in objects:
+            try:
+                obj = json.loads(obj_str)
+                if isinstance(obj, dict) and obj.get("name"):
+                    entities.append(obj)
+            except json.JSONDecodeError:
+                continue
+        if entities:
+            return entities
+
+        return None
 
     def _insert_entities(self, entities: list[dict[str, str]]) -> None:
         """Insert entities using CREATE + skip on duplicate (safe across KuzuDB versions)."""
