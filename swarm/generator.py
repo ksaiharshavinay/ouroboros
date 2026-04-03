@@ -135,17 +135,37 @@ class OuroborosSwarmGenerator(BaseSwarmAdapter):
             return all_turns
         except ImportError:
             logger.warning("[swarm] camel-oasis not installed; using stub simulation.")
-            return self._stub_simulation(len(oasis_personas), rounds)
+            return self._stub_simulation(len(oasis_personas), rounds, personas=personas)
 
-    def _stub_simulation(self, n_agents: int, rounds: int) -> list[dict[str, Any]]:
-        """Minimal fallback simulation when OASIS is not installed."""
+    def _stub_simulation(
+        self, n_agents: int, rounds: int, personas: list[dict[str, Any]] | None = None
+    ) -> list[dict[str, Any]]:
+        """
+        Fallback simulation when OASIS is not installed.
+        Uses persona backgrounds and beliefs so corpus content is domain-specific,
+        not generic placeholder text.
+        """
+        import random
+        rng = random.Random(42)  # deterministic
+        active = min(n_agents, 10)
         turns = []
         for r in range(rounds):
-            for a in range(min(n_agents, 10)):
+            for a in range(active):
+                if personas and a < len(personas):
+                    p = personas[a]
+                    name = p.get("name", f"Agent_{a}")
+                    beliefs = p.get("beliefs", [])
+                    background = p.get("background", "")
+                    belief = rng.choice(beliefs) if beliefs else background
+                    stances = ["supports", "questions", "analyses", "challenges", "advocates for"]
+                    stance = rng.choice(stances)
+                    content = f"{name} {stance}: \"{belief}\""
+                else:
+                    content = f"Agent {a} observes trends in round {r}."
                 turns.append({
                     "round": r,
                     "agent_id": a,
-                    "content": f"Agent {a} observes trends in round {r}.",
+                    "content": content,
                     "influence": (a % 5) * 0.1,
                 })
         return turns
