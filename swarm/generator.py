@@ -73,7 +73,7 @@ class OuroborosSwarmGenerator(BaseSwarmAdapter):
 
             # Stage 3: Run OASIS simulation
             turns = self._run_async(
-                self._run_oasis(oasis_personas, rounds=self.config.simulation_rounds)
+                self._run_oasis(oasis_personas, rounds=self.config.simulation_rounds, personas=personas)
             )
             self._last_turns = turns
 
@@ -110,7 +110,8 @@ class OuroborosSwarmGenerator(BaseSwarmAdapter):
     # ------------------------------------------------------------------
 
     async def _run_oasis(
-        self, oasis_personas: list[dict[str, Any]], rounds: int
+        self, oasis_personas: list[dict[str, Any]], rounds: int,
+        personas: list[dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
         """Run an OASIS Twitter-style social simulation."""
         try:
@@ -135,7 +136,7 @@ class OuroborosSwarmGenerator(BaseSwarmAdapter):
             return all_turns
         except ImportError:
             logger.warning("[swarm] camel-oasis not installed; using stub simulation.")
-            return self._stub_simulation(len(oasis_personas), rounds, personas=personas)
+            return self._stub_simulation(len(oasis_personas), rounds, personas=personas or [])
 
     def _stub_simulation(
         self, n_agents: int, rounds: int, personas: list[dict[str, Any]] | None = None
