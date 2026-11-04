@@ -14,7 +14,12 @@ class OuroConfig:
     # --- LLM / API ---
     # Provider: "claude" (default) or "ollama" (local)
     llm_provider: str = "ollama"
-    llm_model: str = "llama3.2:1b"       # local Ollama model; set to "claude-haiku-4-5" when using claude
+    # Local Ollama model. qwen2.5:1.5b, not llama3.2:1b: inside OASIS
+    # agent turns the 1B llama echoes the tool JSON *schema* back as
+    # the tool-call arguments (every create_post failed on a stray
+    # 'type' kwarg); qwen2.5:1.5b emits well-formed tool calls.
+    # Set to "claude-haiku-4-5" when using claude.
+    llm_model: str = "qwen2.5:1.5b"
     llm_base_url: str = "http://localhost:11434/v1"   # Ollama endpoint; change for Claude
     llm_api_key_env: str = "ANTHROPIC_API_KEY"   # only used when llm_provider="claude"
     # Per-call timeout (seconds) for the swarm's camel model backend.
