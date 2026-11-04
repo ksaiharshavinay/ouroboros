@@ -90,7 +90,10 @@ class PersonaGenerator:
         try:
             result = json.loads(text)
             if isinstance(result, list) and result:
-                return [p for p in result if isinstance(p, dict) and p.get("name")]
+                parsed = [self._normalize_persona(p) for p in result]
+                parsed = [p for p in parsed if p is not None]
+                if parsed:
+                    return parsed
         except json.JSONDecodeError:
             pass
 
@@ -100,7 +103,10 @@ class PersonaGenerator:
             try:
                 result = json.loads(array_match.group())
                 if isinstance(result, list) and result:
-                    return [p for p in result if isinstance(p, dict) and p.get("name")]
+                    parsed = [self._normalize_persona(p) for p in result]
+                    parsed = [p for p in parsed if p is not None]
+                    if parsed:
+                        return parsed
             except json.JSONDecodeError:
                 pass
 
@@ -110,8 +116,9 @@ class PersonaGenerator:
         for obj_str in objects:
             try:
                 obj = json.loads(obj_str)
-                if isinstance(obj, dict) and obj.get("name"):
-                    personas.append(obj)
+                normalized = self._normalize_persona(obj)
+                if normalized is not None:
+                    personas.append(normalized)
             except json.JSONDecodeError:
                 continue
         if personas:
@@ -120,6 +127,44 @@ class PersonaGenerator:
         # 4. Topic-aware fallback
         logger.warning("[personas] Parse failed; generating topic-aware defaults.")
         return self._topic_defaults(expected, 0, topic_str)
+
+    @staticmethod
+    def _normalize_persona(obj: Any) -> dict[str, Any] | None:
+        """Coerce one raw LLM persona object into our schema, or None.
+
+        Small local models routinely emit the right content under variant
+        keys (username / persona_name / bio / description). Accept those
+        aliases instead of discarding the persona — discarding every item
+        in a batch used to return an empty list and silently produce a
+        zero-agent simulation.
+        """
+        if not isinstance(obj, dict):
+            return None
+        name = (
+            obj.get("name") or obj.get("username")
+            or obj.get("persona_name") or obj.get("agent_name")
+        )
+        if not name:
+            return None
+        background = (
+            obj.get("background") or obj.get("bio")
+            or obj.get("description") or obj.get("summary")
+            or "A curious observer."
+        )
+        beliefs = obj.get("beliefs")
+        if not isinstance(beliefs, list):
+            beliefs = []
+        beliefs = [str(b) for b in beliefs]
+        try:
+            influence = float(obj.get("influence_score", 0.5))
+        except (TypeError, ValueError):
+            influence = 0.5
+        return {
+            "name": str(name),
+            "background": str(background),
+            "beliefs": beliefs,
+            "influence_score": influence,
+        }
 
     def _topic_defaults(
         self, n: int, offset: int, topic_str: str
