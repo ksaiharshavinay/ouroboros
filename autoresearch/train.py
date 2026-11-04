@@ -20,6 +20,8 @@
 # Configuration (environment variables):
 #   OURO_TRAIN_BASE_MODEL  base model id/path (default below)
 #   OURO_TRAIN_MAX_STEPS   cap optimizer steps (default: NUM_EPOCHS epochs)
+#   OURO_TRAIN_BATCH_SIZE  per-device batch size (default 8; lower it for
+#                          memory-constrained CPU runs on long content)
 #   OURO_TRAIN_OUTPUT_DIR  checkpoint output dir (default: data/model)
 
 from __future__ import annotations
@@ -49,7 +51,11 @@ BUDGET_MINUTES = 5
 
 # --- Hyperparameters ---
 LEARNING_RATE = 2e-4
-BATCH_SIZE = 8
+# Env-overridable for memory-constrained CPU runs (same precedent as
+# OURO_TRAIN_MAX_STEPS): the fp32 logits tensor scales with
+# batch x seq x vocab (~152k), so long-content batches at size 8 can
+# OOM small VMs. Default unchanged.
+BATCH_SIZE = int(os.environ.get("OURO_TRAIN_BATCH_SIZE", "8"))
 MAX_SEQ_LEN = 512
 NUM_EPOCHS = 3
 
