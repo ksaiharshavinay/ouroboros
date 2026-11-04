@@ -66,6 +66,33 @@ class OuroConfig:
     feedback_state_path: Path = Path("data/ouro_state.json")
     max_feedback_cycles: int = 10
 
+    # --- Feedback gate (Phase 2, Finding 4) ---
+    # The multi-signal gate (ouro/gate.py) decides which inference
+    # predictions re-enter as next-cycle seeds. It replaces the old
+    # Algorithm 7 design, whose logprob score could not be computed by
+    # the shipped adapters and which was never called by the pipeline.
+    # Enabled by default; disable for the paper's ungated baselines
+    # (B3/B4 conditions), which must use the historical uniform path.
+    feedback_gate_enabled: bool = True
+    # Candidates sampled per feedback stage. >= 2 makes the
+    # self-consistency signal measurable; 1 leaves it UNAVAILABLE.
+    feedback_num_candidates: int = 3
+    # Weighted-mean acceptance threshold over the AVAILABLE signals
+    # (weights renormalise over whichever signals are available).
+    gate_accept_threshold: float = 0.50
+    gate_weight_outcome: float = 0.40      # delayed-outcome verification
+    gate_weight_diversity: float = 0.25    # novelty vs the existing seed set
+    gate_weight_consistency: float = 0.20  # self-consistency across samples
+    gate_weight_provenance: float = 0.15   # provenance completeness
+    # Hard vetoes (applied before scoring): a candidate whose distinct
+    # token ratio falls below this is degenerate/repetitive; one shorter
+    # than gate_min_chars carries no seedable content.
+    gate_min_distinct_ratio: float = 0.35
+    gate_min_chars: int = 10
+    # Per-candidate decision audit log (JSONL). None -> written next to
+    # feedback_state_path as gate_decisions.jsonl.
+    gate_log_path: Path | None = None
+
     # --- KuzuDB ---
     kuzu_db_path: Path = Path("data/kuzu_graph")
 
@@ -74,6 +101,8 @@ class OuroConfig:
             p = getattr(self, attr)
             if isinstance(p, str):
                 setattr(self, attr, Path(p))
+        if isinstance(self.gate_log_path, str):
+            self.gate_log_path = Path(self.gate_log_path)
         # Ensure output dirs exist
         self.corpus_dir.mkdir(parents=True, exist_ok=True)
         self.model_dir.mkdir(parents=True, exist_ok=True)

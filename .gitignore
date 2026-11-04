@@ -17,6 +17,7 @@ data/kuzu_graph/
 data/ouro_state.json
 data/last_cycle.json
 data/research_log.jsonl
+data/gate_decisions.jsonl
 data/seeds/feedback_cycle_*.txt
 data/seeds/seed_ccl_rca.txt
 

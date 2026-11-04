@@ -204,6 +204,102 @@ class OuroFeedbackModule:
         )
         return seed_paths
 
+    def run_feedback_gated(
+        self,
+        predictions: list[dict[str, Any]],
+        sim_result: dict[str, Any],
+        seeds_dir: Path | None = None,
+    ) -> list[Path]:
+        """
+        Phase 2 multi-signal gated feedback (ouro/gate.py). This is the
+        feedback path the pipeline runs by default; it supersedes the
+        Algorithm 7 design above (kept for API compatibility, no longer
+        wired in): candidates are scored on delayed-outcome
+        verification, diversity vs the seed set, self-consistency, and
+        provenance completeness, and only accepted candidates are
+        written as seeds. There is NO inject-everything fallback — an
+        empty accept set is a legitimate (and reportable) result.
+
+        Args:
+            predictions: Candidate dicts with keys:
+                - "text": str — the prediction text (required)
+                - "prompt": str — the prompt that produced it
+                - "backend" / "checkpoint_sha256": generator identity
+                - "corpus_path": corpus file the prediction is grounded in
+                - "cycle": cycle the prediction was made in
+                - "source_round": optional last round the candidate saw
+            sim_result: Metadata dict from SwarmGenerator.run().
+            seeds_dir: Output directory for seed files.
+
+        Returns:
+            Paths of the seed files written for ACCEPTED candidates.
+        """
+        from .gate import FeedbackGate
+
+        seeds_dir = seeds_dir or self.config.seed_docs_dir
+        seeds_dir.mkdir(parents=True, exist_ok=True)
+
+        cycle = self.cycle_count
+        candidates = []
+        for pred in predictions:
+            cand = dict(pred)
+            cand.setdefault("cycle", cycle)
+            cand.setdefault("corpus_path", sim_result.get("corpus_path"))
+            candidates.append(cand)
+
+        gate = FeedbackGate(self.config)
+        decisions = gate.evaluate(candidates)
+        self._append_gate_log(cycle, decisions)
+
+        seed_paths: list[Path] = []
+        for cand, decision in zip(candidates, decisions):
+            if not decision["accepted"]:
+                continue
+            idx = decision["index"]
+            seed_path = seeds_dir / f"feedback_cycle_{cycle:04d}_cand_{idx:02d}.txt"
+            seed_path.write_text(
+                self._format_gated_seed(cand.get("text", ""), cycle, idx, decision),
+                encoding="utf-8",
+            )
+            seed_paths.append(seed_path)
+
+        enabled = bool(getattr(self.config, "feedback_gate_enabled", True))
+        cycle_meta = {
+            "cycle": cycle,
+            "seed_files": [str(p) for p in seed_paths],
+            "num_turns": sim_result.get("num_turns", 0),
+            "num_agents": sim_result.get("num_agents", 0),
+            "injection_mode": "gated" if enabled else "uniform_gate_off",
+            "total_candidates": len(candidates),
+            "selected_count": len(seed_paths),
+            "gate_decisions": decisions,
+        }
+        self._state["cycles"].append(cycle_meta)
+        self._state["cycle_count"] = cycle + 1
+        self._save_state()
+
+        logger.info(
+            "[ouro] Gated feedback cycle %d: %d/%d candidates accepted",
+            cycle, len(seed_paths), len(candidates),
+        )
+        return seed_paths
+
+    def _append_gate_log(self, cycle: int, decisions: list[dict[str, Any]]) -> None:
+        """Append per-candidate gate decisions to the JSONL audit log."""
+        from datetime import datetime, timezone
+
+        log_path = getattr(self.config, "gate_log_path", None) or (
+            self._state_path.parent / "gate_decisions.jsonl"
+        )
+        try:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            ts = datetime.now(timezone.utc).isoformat()
+            with log_path.open("a", encoding="utf-8") as f:
+                for d in decisions:
+                    f.write(json.dumps({"ts": ts, "cycle": cycle, **d}) + "\n")
+        except OSError as exc:
+            logger.warning("[ouro] Could not write gate audit log: %s", exc)
+
     def get_history(self) -> list[dict[str, Any]]:
         """Return metadata for all completed feedback cycles."""
         return list(self._state.get("cycles", []))
@@ -313,6 +409,35 @@ class OuroFeedbackModule:
             f"Generated: {ts}\n"
             f"Source: Autonomous prediction from trained OUROBOROS model\n"
             f"Confidence-score: {score:.4f}\n"
+            f"\n"
+            f"{text}\n"
+            f"\n"
+            f"[END PREDICTION]"
+        )
+
+    @staticmethod
+    def _format_gated_seed(text: str, cycle: int, idx: int, decision: dict[str, Any]) -> str:
+        """
+        Wrap an accepted prediction in the structured seed format,
+        recording the gate's decision and per-signal values so the next
+        cycle (and any later audit) can trace why this seed exists.
+        """
+        from datetime import datetime, timezone
+        ts = datetime.now(timezone.utc).isoformat()
+        signal_bits = []
+        for name, sig in (decision.get("signals") or {}).items():
+            value = sig.get("value")
+            signal_bits.append(
+                f"{name}={value if value is not None else 'UNAVAILABLE'}"
+            )
+        return (
+            f"[OUROBOROS MODEL PREDICTION — Cycle {cycle}, Candidate {idx}]\n"
+            f"Generated: {ts}\n"
+            f"Source: Autonomous prediction from trained OUROBOROS model\n"
+            f"Gate-decision: {'ACCEPTED' if decision.get('accepted') else 'REJECTED'} "
+            f"(score={decision.get('weighted_score')}, "
+            f"threshold={decision.get('threshold')})\n"
+            f"Gate-signals: {'; '.join(signal_bits) if signal_bits else 'gate bypassed'}\n"
             f"\n"
             f"{text}\n"
             f"\n"

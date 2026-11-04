@@ -129,8 +129,8 @@ class OuroPipeline:
             logger.warning("[ouro] No trained model yet; skipping inference & feedback.")
             return sim_result, research_result, Path()
 
-        prediction = self.infer.predict(prompt, context=self._load_corpus_context(sim_result))
-        seed_path = self.feedback.run_feedback(prediction, sim_result)
+        context = self._load_corpus_context(sim_result)
+        seed_path = self._infer_and_feed_back(prompt, context, sim_result)
 
         # Persist full cycle metadata to disk
         state_path = self.config.feedback_state_path.parent / "last_cycle.json"
@@ -192,6 +192,45 @@ class OuroPipeline:
             logger.warning("[ouro] Could not load corpus for context: %s", exc)
             return None
 
+    def _infer_and_feed_back(
+        self, prompt: str, context: str | None, sim_result: dict[str, Any]
+    ) -> Path:
+        """
+        The pipeline's feedback stage (Phase 2): inference predictions
+        become next-cycle seeds THROUGH the multi-signal gate
+        (ouro/gate.py) whenever it is enabled — the default. Candidates
+        are sampled with their inference provenance attached so the gate
+        can score them. With the gate disabled (the paper's ungated
+        baseline conditions), the historical uniform path runs instead:
+        one prediction, injected unconditionally.
+
+        Returns the first accepted seed path, or Path() when the gate
+        accepted nothing (a legitimate, logged result).
+        """
+        if not getattr(self.config, "feedback_gate_enabled", True):
+            prediction = self.infer.predict(prompt, context=context)
+            return self.feedback.run_feedback(prediction, sim_result)
+
+        n = max(1, int(getattr(self.config, "feedback_num_candidates", 3)))
+        candidates: list[dict[str, Any]] = []
+        for _ in range(n):
+            meta = self.infer.predict_with_metadata(prompt, context=context)
+            candidates.append({
+                "prompt": prompt,
+                "text": meta["text"],
+                "backend": meta["backend"],
+                "checkpoint_sha256": meta["checkpoint_sha256"],
+                "corpus_path": sim_result.get("corpus_path"),
+                "cycle": self.feedback.cycle_count,
+            })
+        paths = self.feedback.run_feedback_gated(candidates, sim_result)
+        if not paths:
+            logger.warning(
+                "[ouro] Gate accepted no candidates this cycle; no feedback seed written."
+            )
+            return Path()
+        return paths[0]
+
     def run_feedback_from_disk(self, prompt: str = "Summarize the predictions.") -> Path:
         """
         Run only the inference + feedback stage, loading sim_result from the
@@ -208,5 +247,4 @@ class OuroPipeline:
 
         sim_result = state.get("sim_result", {})
         context = self._load_corpus_context(sim_result)
-        prediction = self.infer.predict(prompt, context=context)
-        return self.feedback.run_feedback(prediction, sim_result)
+        return self._infer_and_feed_back(prompt, context, sim_result)
