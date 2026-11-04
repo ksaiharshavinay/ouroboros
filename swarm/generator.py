@@ -86,6 +86,16 @@ class OuroborosSwarmGenerator(BaseSwarmAdapter):
             )
             self._last_turns = turns
 
+            # Stage 3b (Phase 2): provenance enrichment — record which
+            # turn produced which entity in the knowledge graph. Guarded:
+            # enrichment failure must never fail the simulation.
+            try:
+                self._graph_builder.build_from_turns(
+                    turns, source_ref=f"corpus_cycle_{cycle:04d}"
+                )
+            except Exception as exc:
+                logger.warning("[swarm] Turn graph enrichment failed: %s", exc)
+
             # Stage 4: Export corpus
             corpus_path = self._export_corpus(turns, cycle=cycle)
 
