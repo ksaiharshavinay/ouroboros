@@ -2,7 +2,7 @@
 
 > *The serpent that consumes its own tail — endlessly regenerating.*
 
-**PATENT PENDING** | © 2026 Kudikala Sai Harsha Vinay. All rights reserved.
+**PATENT APPLICATION IN PREPARATION** | © 2026 Kudikala Sai Harsha Vinay. All rights reserved.
 
 ---
 
@@ -23,6 +23,20 @@ OUROBOROS is a self-improving AI system built on a **recursive feedback loop**. 
 ```
 
 The core novel mechanism: **the model's own prediction outputs feed back as new simulation seeds**, creating a closed loop that neither the swarm engine nor the training loop achieves independently.
+
+---
+
+## Project status
+
+- **Ownership:** OUROBOROS is a personal research project of Kudikala Sai
+  Harsha Vinay. It is not affiliated with, sponsored by, or endorsed by any
+  employer.
+- **Intellectual property:** The project follows a patent-first strategy. A
+  patent application covering the recursive feedback mechanism is in
+  preparation; research publication is planned only after the application
+  has been filed. No license to the mechanism is granted by this
+  repository's public availability.
+- **Development stage:** Research prototype under active development.
 
 ---
 
@@ -291,5 +305,6 @@ See `CONTRIBUTING.md`.
 
 ## License
 
-Proprietary — All Rights Reserved. Patent Pending.
-See `LICENSE-FUTURE.md` for the planned post-patent Apache 2.0 release.
+Proprietary — All Rights Reserved. Patent application in preparation.
+See `LICENSE-FUTURE.md` for the planned Apache 2.0 release once patent
+protection is secured.
