@@ -127,11 +127,13 @@ def test_run_async_returns_correct_value(generator):
 
 
 # ---------------------------------------------------------------------------
-# _run_oasis — camel-oasis absent (stub path)
+# _run_oasis — camel-oasis absent (stub path is now an explicit opt-in)
 # ---------------------------------------------------------------------------
 
-def test_run_oasis_falls_back_to_stub_when_no_camel(generator):
-    """When camel-oasis is not installed, _run_oasis should return stub turns."""
+def test_run_oasis_falls_back_to_stub_when_no_camel(tmp_path):
+    """Phase 1 changed the contract: the stub fallback requires
+    OuroConfig.allow_stub_simulation=True. With the opt-in set and
+    camel-oasis unimportable, _run_oasis returns stub turns."""
     import builtins
     real_import = builtins.__import__
 
@@ -140,8 +142,19 @@ def test_run_oasis_falls_back_to_stub_when_no_camel(generator):
             raise ImportError("camel-oasis not installed")
         return real_import(name, *args, **kwargs)
 
+    cfg = OuroConfig(
+        seed_docs_dir=tmp_path / "seeds",
+        corpus_dir=tmp_path / "corpus",
+        model_dir=tmp_path / "model",
+        feedback_state_path=tmp_path / "state.json",
+        kuzu_db_path=tmp_path / "kuzu",
+        allow_stub_simulation=True,
+    )
+    with patch.object(OuroborosSwarmGenerator, "_make_llm_client", return_value=MagicMock()):
+        gen = OuroborosSwarmGenerator(cfg)
+
     with patch("builtins.__import__", side_effect=block_oasis):
-        turns = asyncio.run(generator._run_oasis([], rounds=2))
+        turns = asyncio.run(gen._run_oasis([], rounds=2))
 
     assert isinstance(turns, list)
 
