@@ -41,7 +41,10 @@ class GraphBuilder:
 
         self._cycle = cycle
         self._db_path.mkdir(parents=True, exist_ok=True)
-        self._db = kuzu.Database(str(self._db_path))
+        # Kuzu >= 0.9 uses single-file databases: the path must be a file,
+        # not a directory (0.7.x accepted a directory). Keep the configured
+        # directory as the container and put the DB file inside it.
+        self._db = kuzu.Database(str(self._db_path / "kuzu.db"))
         self._conn = kuzu.Connection(self._db)
         self._init_schema()
 

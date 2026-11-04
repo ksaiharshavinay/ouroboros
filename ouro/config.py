@@ -17,6 +17,11 @@ class OuroConfig:
     llm_model: str = "llama3.2:1b"       # local Ollama model; set to "claude-haiku-4-5" when using claude
     llm_base_url: str = "http://localhost:11434/v1"   # Ollama endpoint; change for Claude
     llm_api_key_env: str = "ANTHROPIC_API_KEY"   # only used when llm_provider="claude"
+    # Per-call timeout (seconds) for the swarm's camel model backend.
+    # camel-ai defaults to 180s, which a CPU Ollama backend cannot meet
+    # when a whole OASIS step of agents queues behind one model — calls
+    # time out and retry in lockstep. 1800s is sized for local CPU runs.
+    llm_timeout: float = 1800.0
 
     # --- Swarm simulation ---
     num_agents: int = 500
