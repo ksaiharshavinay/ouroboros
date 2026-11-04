@@ -14,7 +14,7 @@ class OuroConfig:
     # --- LLM / API ---
     # Provider: "claude" (default) or "ollama" (local)
     llm_provider: str = "ollama"
-    llm_model: str = "gemma4"            # set to "claude-haiku-4-5" when using claude
+    llm_model: str = "llama3.2:1b"       # local Ollama model; set to "claude-haiku-4-5" when using claude
     llm_base_url: str = "http://localhost:11434/v1"   # Ollama endpoint; change for Claude
     llm_api_key_env: str = "ANTHROPIC_API_KEY"   # only used when llm_provider="claude"
 
@@ -36,6 +36,12 @@ class OuroConfig:
     # Base model for the real LoRA SFT loop (autoresearch/train.py).
     # Small enough for CPU smoke runs; override for real experiments.
     train_base_model: str = "Qwen/Qwen2.5-0.5B-Instruct"
+    # Interpreter used by OuroPipeline to launch the autoresearch scripts
+    # (prepare.py / train.py). Those need the pinned Python 3.11 ML env,
+    # not whatever "python3" is on PATH. None -> resolve at runtime:
+    # $OURO_TRAIN_PYTHON, then a sibling ``ouro-venv311`` venv next to the
+    # repo checkout, then sys.executable.
+    train_python: str | None = None
 
     # --- Corpus / training ---
     corpus_dir: Path = Path("data/corpus")

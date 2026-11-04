@@ -6,7 +6,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -62,6 +64,27 @@ class OuroPipeline:
     # Stage 2 — AutoResearch training loop
     # ------------------------------------------------------------------
 
+    def _train_python(self) -> str:
+        """Interpreter for the autoresearch subprocesses.
+
+        train.py needs the pinned Python 3.11 environment (torch/peft);
+        the system python3 (3.12) has no ML stack. Resolution order:
+        config.train_python -> $OURO_TRAIN_PYTHON -> sibling
+        ``ouro-venv311`` venv -> sys.executable.
+        """
+        configured = getattr(self.config, "train_python", None)
+        if configured:
+            return configured
+        env = os.environ.get("OURO_TRAIN_PYTHON")
+        if env:
+            return env
+        venv_python = (
+            Path(__file__).parent.parent.parent / "ouro-venv311" / "bin" / "python"
+        )
+        if venv_python.exists():
+            return str(venv_python)
+        return sys.executable
+
     def run_autoresearch(self) -> dict[str, Any]:
         """
         Launch the AutoResearch agent loop which modifies training code, runs
@@ -69,13 +92,14 @@ class OuroPipeline:
         """
         prepare_script = Path(__file__).parent.parent / "autoresearch" / "prepare.py"
         train_script = Path(__file__).parent.parent / "autoresearch" / "train.py"
+        python = self._train_python()
 
-        logger.info("[ouro] Preparing corpus for AutoResearch...")
-        subprocess.run(["python3", str(prepare_script)], check=True)
+        logger.info("[ouro] Preparing corpus for AutoResearch (python: %s)...", python)
+        subprocess.run([python, str(prepare_script)], check=True)
 
         logger.info("[ouro] Starting AutoResearch training loop...")
         result = subprocess.run(
-            ["python3", str(train_script)],
+            [python, str(train_script)],
             capture_output=True,
             text=True,
         )
