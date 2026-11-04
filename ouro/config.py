@@ -22,6 +22,11 @@ class OuroConfig:
     # when a whole OASIS step of agents queues behind one model — calls
     # time out and retry in lockstep. 1800s is sized for local CPU runs.
     llm_timeout: float = 1800.0
+    # Max tokens per swarm-agent response. Uncapped, a 1B local model
+    # rambles past 1,200 tokens in a single agent turn without emitting
+    # a tool call or stop (observed live on CPU at ~2 tok/s = 10+ min
+    # per runaway response). A tool call plus short post needs far less.
+    llm_max_tokens: int = 512
 
     # --- Swarm simulation ---
     num_agents: int = 500

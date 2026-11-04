@@ -186,6 +186,9 @@ class OuroborosSwarmGenerator(BaseSwarmAdapter):
         return ModelFactory.create(
             model_platform=ModelPlatformType.OPENAI,
             model_type=self.config.llm_model,
+            model_config_dict={
+                "max_tokens": getattr(self.config, "llm_max_tokens", 512),
+            },
             url=self.config.llm_base_url,
             api_key=os.environ.get("OLLAMA_API_KEY", "ollama"),
             timeout=timeout,
