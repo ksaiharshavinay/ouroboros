@@ -22,11 +22,20 @@ class OuroConfig:
     num_agents: int = 500
     simulation_rounds: int = 30
     seed_docs_dir: Path = Path("data/seeds")
+    # OASIS platform: "twitter" or "reddit"
+    oasis_platform: str = "twitter"
+    # Stub simulation is EXPLICIT opt-in. When False (default), a missing or
+    # failing OASIS install raises instead of silently substituting templated
+    # stub turns — paper runs must never degrade to the stub unnoticed.
+    allow_stub_simulation: bool = False
 
     # --- AutoResearch ---
     autoresearch_program: Path = Path("autoresearch/program.md")
     experiment_budget_minutes: int = 5
     max_experiments: int = 100
+    # Base model for the real LoRA SFT loop (autoresearch/train.py).
+    # Small enough for CPU smoke runs; override for real experiments.
+    train_base_model: str = "Qwen/Qwen2.5-0.5B-Instruct"
 
     # --- Corpus / training ---
     corpus_dir: Path = Path("data/corpus")
