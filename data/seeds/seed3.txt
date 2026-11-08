@@ -1,0 +1,60 @@
+Title: The Energy Transition: Renewables, Grids, and Climate Adaptation (2025)
+
+## Overview
+The shift from fossil fuels to renewable energy is no longer mainly a
+technology story — solar and wind are now among the cheapest sources of new
+electricity in many markets. The hard problems have moved downstream: grids
+built for one-way flow from big plants, storage that must cover cloudy and
+windless stretches, and communities that experience the transition very
+differently depending on where they live.
+
+## Key Trends
+
+## 1. Renewables Scale, Grids Strain
+Solar and wind capacity is growing fast, but transmission lines, grid
+connections, and permitting move slowly. Projects wait years to connect,
+and curtailment — throwing away clean power the grid cannot take — is
+becoming common in some regions.
+
+## 2. Storage Becomes the Swing Factor
+Batteries are falling in cost and spreading from grid scale to homes and
+vehicles. How much storage, of what duration, and who pays for it is now
+a central planning question rather than a footnote.
+
+## 3. Electrification of Everything
+Heat pumps, electric vehicles, and industrial electrification are shifting
+demand onto the power grid even as supply becomes more variable. Managing
+when demand happens — through pricing, smart charging, and flexible loads —
+matters as much as building new supply.
+
+## 4. Adaptation Joins Mitigation
+Heatwaves, floods, and wildfires are forcing cities and insurers to plan
+for climate impacts already arriving, not only for emissions cuts. Cooling,
+flood defences, and resilient infrastructure compete for the same budgets
+as clean-energy build-out.
+
+## 5. The Politics of Who Pays and Who Benefits
+Energy transitions create winners (regions with sun, wind, or minerals)
+and losers (coal communities, households facing higher bills). Subsidies,
+tariffs, and local opposition shape deployment as much as engineering does.
+
+## Key Actors
+- Grid operators and utilities: Must keep the lights on while the system is rebuilt around them.
+- Governments (national, state, local): Set targets, subsidies, permitting rules, and market design.
+- Renewable developers and manufacturers: Build the capacity; exposed to supply chains, interest rates, and trade policy.
+- Fossil-fuel companies and workers: Defend existing assets and jobs while some pivot into clean energy.
+- Households and communities: Pay the bills, host the infrastructure, and vote on the pace of change.
+
+## Emerging Dynamics
+- Vehicle-to-grid and home batteries are turning consumers into small-scale grid participants.
+- Long-duration storage (hydrogen, compressed air, thermal) is attracting attention for multi-day gaps batteries cannot cover.
+- Climate risk is being priced into insurance and mortgages, quietly redrawing where it is affordable to live.
+- Some regions are leapfrogging central grids entirely with solar-plus-storage microgrids.
+
+## Open Questions
+1. What matters more for the next decade — building more renewable capacity, or fixing grids and permitting?
+2. Who should bear the cost of storage and grid upgrades: ratepayers, taxpayers, or developers?
+3. Can adaptation and mitigation be funded together, or will one always crowd out the other?
+4. How do communities that lose fossil-fuel jobs get a fair share of the transition's benefits?
+
+---

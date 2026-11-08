@@ -1,0 +1,60 @@
+Title: AI in Healthcare: Diagnosis, Access, and Trust (2025)
+
+## Overview
+AI is moving from research papers into clinics: reading scans, drafting
+notes, triaging messages, and flagging patients at risk. The promise is
+real — earlier detection, less paperwork, wider access. So is the risk:
+models trained on unrepresentative data, deployed into workflows that
+were never designed for them, in a setting where a wrong answer can harm
+a person, not just waste a click.
+
+## Key Trends
+
+## 1. Diagnostic AI Reaches the Clinic
+Imaging and pathology models now match or exceed human performance on
+narrow, well-defined tasks. The open question has shifted from accuracy
+in a lab to performance on real patients, real scanners, and real
+variation across hospitals.
+
+## 2. The Documentation Burden Moves, Not Vanishes
+Ambient scribes and summarisation tools promise to free clinicians from
+keyboards. Early adopters report real time savings — and new work:
+reviewing, correcting, and taking responsibility for AI-drafted text.
+
+## 3. Bias Travels With the Training Data
+Models learn the gaps in the data they are fed: under-represented groups,
+under-resourced hospitals, and conditions that present differently across
+populations. A model that works well on average can still fail specific
+patients systematically.
+
+## 4. Access Widens — Unevenly
+AI triage and remote diagnostics can reach places with few specialists,
+but only where connectivity, devices, and follow-up care exist. The same
+tool can narrow gaps in one setting and widen them in another.
+
+## 5. Regulation and Liability Lag Deployment
+Approval frameworks built for fixed medical devices strain against
+models that update continuously. Clinicians, hospitals, and vendors are
+still negotiating who is liable when an AI recommendation contributes to
+a bad outcome.
+
+## Key Actors
+- Clinicians (radiologists, pathologists, primary care): Use the tools, bear the liability, and decide when to trust them.
+- Patients: Experience the benefits and the errors, often without knowing AI was involved.
+- Health systems and insurers: Decide what gets purchased, reimbursed, and integrated into workflows.
+- Regulators (FDA and equivalents): Approve devices and set post-market surveillance expectations.
+- AI vendors and researchers: Build the models; control much of the training data and evaluation design.
+
+## Emerging Dynamics
+- Federated learning is being tried as a way to train on hospital data without moving it.
+- Patients are arriving with AI-generated self-diagnoses, changing the consultation itself.
+- Ambient documentation is generating vast new text corpora — valuable for research, sensitive for privacy.
+- Some systems are publishing model performance broken down by subgroup, turning fairness into a reportable metric.
+
+## Open Questions
+1. When a model and a clinician disagree, who should win — and who is responsible either way?
+2. How should diagnostic AI be monitored after deployment, when its inputs keep changing?
+3. Can AI narrow health disparities, or will it mostly serve the patients and hospitals already best served?
+4. What should patients be told about AI's role in their own care?
+
+---

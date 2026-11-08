@@ -1,0 +1,58 @@
+Title: Algorithmic Finance: Retail Trading, Automation, and Market Stability (2025)
+
+## Overview
+Trading that once belonged to institutions now fits in a pocket: zero-commission
+apps, fractional shares, options in a few taps, and social feeds full of
+trade ideas. Behind the interface, algorithms execute most volume, market
+makers pay for order flow, and AI tools summarise earnings and screen
+stocks for anyone. Access has been democratised; the risks have been
+democratised with it.
+
+## Key Trends
+
+## 1. Retail Becomes a Market Force
+Coordinated retail buying can now move prices in ways that surprise
+professionals. Flows from millions of small accounts are tracked as a
+signal in their own right, and "meme stock" episodes have become a
+recurring feature rather than a one-off.
+
+## 2. The Interface Shapes the Trade
+Gamified design — confetti, leaderboards, push notifications, one-tap
+options — lowers friction. The same features that make investing
+approachable also encourage frequency, leverage, and trades made on
+impulse rather than analysis.
+
+## 3. Algorithms Run the Plumbing
+High-frequency trading, market making, and execution algorithms provide
+liquidity in calm markets and can withdraw it in stressed ones. Flash
+crashes and sudden volatility spikes remain a live worry for regulators.
+
+## 4. AI Enters the Research Stack
+Retail and professional investors alike now use AI to summarise filings,
+screen for ideas, and backtest strategies. The edge it gives depends
+heavily on data quality, prompt design, and whether everyone is reading
+the same summarised version of the same news.
+
+## 5. Leverage, Quietly, Everywhere
+Options, margin, and leveraged products put amplified exposure within
+easy reach. Many new traders encounter their first large loss through a
+product whose risk they understood only in outline.
+
+## Key Actors
+- Retail brokerages and trading apps: Set the interface, the fees (or lack of them), and the defaults.
+- Market makers and exchanges: Provide liquidity and set the mechanics of execution.
+- Regulators (SEC and equivalents): Police disclosure, market manipulation, and investor protection.
+- Financial influencers and communities: Shape what millions of small traders buy, often without accountability.
+- Institutional investors: Adapt strategies to retail flows they once ignored.
+
+## Emerging Dynamics
+- Payment for order flow is under regulatory scrutiny, with its future uncertain in several markets.
+- Paper trading and simulated portfolios are growing as a low-stakes way to learn — without risking real money.
+- AI-generated trade commentary is flooding social feeds, blurring the line between analysis and advertising.
+- Some brokerages are adding friction deliberately — cooling-off prompts, risk disclosures — after criticism of gamification.
+
+## Open Questions
+1. Does easier access to markets make ordinary people wealthier, or just more exposed?
+2. Who is responsible when an interface design encourages a trade a user does not fully understand?
+3. Can regulators keep markets stable when most volume is algorithmic and most new participants are retail?
+4. What does "informed" investing mean when both the research and the trade are one tap away?

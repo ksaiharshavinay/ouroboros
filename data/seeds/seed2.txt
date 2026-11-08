@@ -1,0 +1,63 @@
+Title: Governing AI Inside the Enterprise: Data Quality, Privacy, and Accountability (2025)
+
+## Overview
+As companies rush to put AI into core operations, the limiting factor is
+rarely the model — it is the data underneath it. Poor-quality, undocumented,
+or improperly governed data produces confident wrong answers, biased
+decisions, and regulatory exposure. Data governance, once a back-office
+compliance function, is becoming the control layer that decides whether
+enterprise AI is trustworthy enough to use.
+
+## Key Trends
+
+## 1. From Data Quality Checks to AI Readiness
+Quality programs are shifting from periodic batch checks to continuous
+monitoring of the data that feeds models — freshness, completeness,
+lineage, and drift. A dataset that was "good enough" for a dashboard can
+fail silently as training or retrieval input.
+
+## 2. Privacy by Design Under Pressure
+Regulations in the EU, several US states, and other jurisdictions now
+expect purpose limitation, minimization, and deletion rights to be built
+into systems, not bolted on. Teams are discovering that retrofitting
+privacy into a pipeline built for maximum collection is expensive and
+sometimes impossible.
+
+## 3. Lineage and Provenance Become Evidence
+When an AI system makes a consequential decision, "which data, from where,
+transformed how?" is no longer an audit nicety — it is the explanation.
+Lineage graphs, data contracts, and catalogues are moving from
+documentation tools to operational evidence.
+
+## 4. The Accountability Gap
+Models are owned by one team, data by another, and outcomes by a third.
+When an AI decision goes wrong, responsibility is diffuse. Organisations
+are experimenting with model owners, AI review boards, and sign-off
+rituals, with no settled pattern yet.
+
+## 5. Automation of Governance Itself
+AI is now being used to write data-quality rules, classify sensitive data,
+and flag anomalies — the same technology being governed is doing the
+governing. That speeds coverage but raises the question of who watches
+the watcher.
+
+## Key Actors
+- Chief Data Officers and data-governance teams: Own the policies, catalogues, and quality programs.
+- Regulators (EU AI Act, US state privacy laws, sector regulators): Set the floor for transparency, risk management, and rights.
+- Platform and cloud vendors: Ship the catalogues, lineage, and policy engines governance runs on.
+- Model builders and data engineers: Live with the controls day to day — and work around them when they slow delivery.
+- Auditors and insurers: Increasingly ask for proof that AI systems are governed, not just built.
+
+## Emerging Dynamics
+- Data contracts between producers and consumers are spreading as a way to make quality expectations enforceable.
+- Synthetic data is being offered as a privacy workaround, raising its own questions about fidelity and hidden bias.
+- Small and mid-size companies are adopting governance tooling that was once only affordable at enterprise scale.
+- "Governance as code" — policies expressed as executable checks — is narrowing the gap between policy documents and running systems.
+
+## Open Questions
+1. Can governance keep pace with how fast teams ship AI features, or does it always become a bottleneck?
+2. Who should be accountable when a governed, well-documented system still produces a harmful decision?
+3. Does automating governance with AI strengthen oversight, or just move the risk one layer up?
+4. What does "good enough" data quality mean when the consumer is a model rather than a person?
+
+---
