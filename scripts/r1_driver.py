@@ -225,6 +225,9 @@ def stage2() -> None:
         "eval_perplexity": meta["eval_perplexity"],
         "adapter_sha256": meta["adapter_sha256"],
     })
+    frozen_path = REPO / "data/corpus/frozen_eval_groups.json"
+    if frozen_path.exists():
+        rec["frozen_eval_groups"] = json.loads(frozen_path.read_text())
     save_summary(summary)
     log.info("STAGE2 DONE cycle=%d in %.1fs — loss %s -> %s, ppl %s -> %s",
              cycle, rec["stage2_seconds"], rec["train_loss_first"],

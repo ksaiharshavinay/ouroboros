@@ -112,3 +112,29 @@ def test_load_corpus_tags_source_file(tmp_path, monkeypatch):
     turns = prepare.load_corpus()
     assert len(turns) == 1
     assert turns[0]["_source_file"] == "corpus_cycle_0007.jsonl"
+
+
+def test_frozen_eval_ids_keep_same_eval_as_corpus_grows():
+    # Cycle 0: two files, 4 groups. Freeze whatever cycle 0 drew.
+    examples0 = prepare.turns_to_training_examples(_two_file_turns())
+    _, eval0 = prepare.split_examples(examples0, seed=42)
+    frozen = {e["group"] for e in eval0}
+    assert frozen  # cycle 0 must have drawn a non-empty eval
+    # Cycle 1: add a third file (new groups appear).
+    turns = _two_file_turns()
+    for i, r in enumerate((1, 1, 2, 2)):
+        turns.append(_turn("corpus_cycle_0002.jsonl", r,
+                           f"corpus_cycle_0002.jsonl turn {i} round {r}"))
+    grown = prepare.turns_to_training_examples(turns)
+    train, eval_ = prepare.split_examples(grown, seed=42,
+                                          frozen_eval_ids=frozen)
+    assert {e["group"] for e in eval_} == frozen
+    prepare.assert_no_leakage(train, eval_)  # must not raise
+    assert len(train) + len(eval_) == len(grown)
+
+
+def test_frozen_eval_ids_missing_from_corpus_raises():
+    examples = prepare.turns_to_training_examples(_two_file_turns())
+    with pytest.raises(ValueError, match="Frozen eval groups not found"):
+        prepare.split_examples(examples, seed=42,
+                               frozen_eval_ids={"no-such-file#round1"})

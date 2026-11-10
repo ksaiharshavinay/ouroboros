@@ -92,10 +92,16 @@ def split_examples(
     examples: list[dict],
     eval_split: float = EVAL_SPLIT,
     seed: int = DEFAULT_SPLIT_SEED,
+    frozen_eval_ids: set[str] | None = None,
 ) -> tuple[list[dict], list[dict]]:
     """
     Split examples into (train, eval) by GROUP: every group id goes
     entirely to one side. Deterministic for a given seed.
+
+    With frozen_eval_ids given, those groups — and only those groups —
+    form eval, whatever new groups have appeared since cycle 0. That is
+    the frozen test set the paper's Table III specifies: the same items
+    are evaluated at every cycle, so cross-cycle perplexity is comparable.
 
     With >= 2 groups, at least one group lands in eval and at least one
     in train; eval grows group-by-group until it reaches the requested
@@ -112,6 +118,20 @@ def split_examples(
         return list(examples), []
 
     rng = random.Random(seed)
+
+    if frozen_eval_ids is not None:
+        eval_ids = {g for g in frozen_eval_ids if g in by_group}
+        if not eval_ids:
+            raise ValueError(
+                "Frozen eval groups not found in corpus: "
+                f"{sorted(frozen_eval_ids)}"
+            )
+        train = [ex for ex in examples if ex["group"] not in eval_ids]
+        eval_ = [ex for ex in examples if ex["group"] in eval_ids]
+        rng.shuffle(train)
+        rng.shuffle(eval_)
+        return train, eval_
+
     shuffled = group_ids[:]
     rng.shuffle(shuffled)
 
@@ -159,7 +179,32 @@ def main() -> None:
 
     seed = int(os.environ.get("OURO_SPLIT_SEED", DEFAULT_SPLIT_SEED))
     examples = turns_to_training_examples(turns)
-    train_examples, eval_examples = split_examples(examples, seed=seed)
+
+    # Frozen test set: cycle 0's eval groups are written to
+    # data/corpus/frozen_eval_groups.json on first use and reused verbatim
+    # on every later cycle. The file lives under data/corpus/ so
+    # r1_driver init() (which clears data/corpus/) resets it for a fresh
+    # trajectory. Only write it when eval is non-empty: with a single
+    # group there is no honest split, and an empty frozen set must not
+    # lock later cycles into an empty eval.
+    frozen_path = CORPUS_DIR / "frozen_eval_groups.json"
+    if frozen_path.exists():
+        frozen_ids = set(json.loads(frozen_path.read_text()))
+        if frozen_ids:
+            train_examples, eval_examples = split_examples(
+                examples, seed=seed, frozen_eval_ids=frozen_ids)
+            logger.info("Frozen eval groups reused: %s (%d examples)",
+                        sorted(frozen_ids), len(eval_examples))
+        else:
+            train_examples, eval_examples = split_examples(examples, seed=seed)
+    else:
+        train_examples, eval_examples = split_examples(examples, seed=seed)
+        if eval_examples:
+            frozen_ids = sorted({ex["group"] for ex in eval_examples})
+            frozen_path.write_text(json.dumps(frozen_ids, indent=2))
+            logger.info("Frozen eval groups written: %s (%d examples)",
+                        frozen_ids, len(eval_examples))
+
     assert_no_leakage(train_examples, eval_examples)
 
     n_groups = len({ex["group"] for ex in examples})
