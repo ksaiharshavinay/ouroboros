@@ -32,9 +32,11 @@ import logging
 import math
 import os
 import random
+import shutil
 import sqlite3
 import sys
 import time
+import zipfile
 from pathlib import Path
 
 REPO = Path.cwd()
@@ -117,7 +119,20 @@ def current_cycle_record(summary: dict, cycle: int) -> dict:
 def init() -> None:
     state_path = OUT / "run_state.json"
     if state_path.exists():
-        log.info("init already done — %s exists, skipping reset", state_path)
+        # Trap: OUT survived a dead runtime (or was restored from a
+        # snapshot) but the clone is a fresh checkout — run_state says
+        # "initialized" while the clone's cycle counter is 0 and the
+        # summary already holds completed cycles. Silently no-oping here
+        # would restart the trajectory at cycle 0 and overwrite the
+        # completed cycles' records, so restore the trajectory instead.
+        completed = _completed_cycles(load_summary())
+        if completed and _clone_cycle_count() == 0:
+            log.warning(
+                "init: OUT holds %d completed cycle(s) but the clone is "
+                "fresh — resuming instead of resetting", len(completed))
+            resume()
+        else:
+            log.info("init already done — %s exists, skipping reset", state_path)
         return
     data = REPO / "data"
     seeds = data / "seeds"
@@ -304,7 +319,337 @@ def stage3() -> None:
              OUT / "r1_summary.json")
 
 
+# ---------------------------------------------------------------- resume
+# Trajectory state that must survive a dead runtime. Everything the next
+# cycle reads lives in the clone's data/ tree:
+#   data/ouro_state.json               cycle_count + per-cycle feedback meta
+#   data/seeds/feedback_cycle_*.txt    accumulated feedback seeds — the
+#                                      recursion channel itself
+#   data/corpus/corpus_cycle_*.jsonl   accumulated corpus; prepare.py
+#                                      rebuilds train/eval.jsonl from these
+#   data/corpus/frozen_eval_groups.json  eval groups frozen at cycle 0;
+#                                      without it prepare.py would freeze a
+#                                      different split from the full corpus
+#   data/gate_decisions.jsonl          B5 gate audit log (continuity only)
+#   data/model/checkpoint/checkpoint_metadata.json  informational — stage 2
+#                                      overwrites it; training always starts
+#                                      from the base model, so the LoRA
+#                                      adapter weights are per-cycle outputs,
+#                                      NOT trajectory state, and are excluded.
+# Also excluded: data/kuzu_graph (a derived cache, rebuilt from the seed
+# documents on every stage 1) and train/eval.jsonl (regenerated
+# deterministically by prepare.py: fixed split seed + the frozen groups).
+# No RNG state needs restoring: every stage is a fresh process that
+# re-seeds random with RNG_SEED, exactly as in the notebook flow.
+#
+# A state source is one of:
+#   OUT/state/            written by `r1_driver.py snapshot` after a cycle
+#   OUT/*checkpoint*.zip  the notebook checkpoint layout (run/ + repo/)
+# The loose per-cycle OUT files alone (summary/params/logs) are NOT enough
+# to resume — they never contained the clone's data/ state.
+
+def _completed_cycles(summary: dict) -> list[int]:
+    return sorted(int(r["cycle"]) for r in summary.get("cycles", [])
+                  if r.get("complete"))
+
+
+def _clone_cycle_count() -> int:
+    p = REPO / "data/ouro_state.json"
+    if p.exists():
+        try:
+            return int(json.loads(p.read_text()).get("cycle_count", 0))
+        except (json.JSONDecodeError, ValueError, TypeError):
+            return 0
+    return 0
+
+
+FIXED_STATE_FILES = [
+    "data/ouro_state.json",
+    "data/corpus/frozen_eval_groups.json",
+    "data/gate_decisions.jsonl",
+    "data/model/checkpoint/checkpoint_metadata.json",
+]
+# Per-cycle state files. Feedback naming depends on the arm's injection
+# mode (feedback.py): feedback_cycle_{i:04d}.txt (uniform),
+# ..._pred_{NN}.txt, ..._cand_{NN}.txt (gated) — hence prefix matching.
+_CYCLE_PATTERNS = (("data/seeds", "feedback_cycle_"),
+                   ("data/corpus", "corpus_cycle_"))
+
+
+def _cycle_index(rel: str) -> int | None:
+    """Cycle index of a per-cycle state file, or None for fixed files."""
+    for sub, prefix in _CYCLE_PATTERNS:
+        if rel.startswith(f"{sub}/{prefix}"):
+            token = rel[len(sub) + len(prefix) + 1:].split("_")[0].split(".")[0]
+            try:
+                return int(token)
+            except ValueError:
+                return None
+    return None
+
+
+def _expected_state_files(last: int) -> list[str]:
+    rels = list(FIXED_STATE_FILES)
+    for i in range(last + 1):
+        rels.append(f"data/corpus/corpus_cycle_{i:04d}.jsonl")
+    return rels
+
+
+def _required_state_files(last: int) -> list[str]:
+    """Files without which a resumed trajectory would diverge or restart."""
+    rels = ["data/ouro_state.json", "data/corpus/frozen_eval_groups.json"]
+    for i in range(last + 1):
+        rels.append(f"data/corpus/corpus_cycle_{i:04d}.jsonl")
+    return rels
+
+
+def _read_state_dir(root: Path) -> dict[str, bytes]:
+    state: dict[str, bytes] = {}
+    for rel in FIXED_STATE_FILES:
+        p = root / rel
+        if p.exists():
+            state[rel] = p.read_bytes()
+    for sub, pat in (("data/seeds", "feedback_cycle_*.txt"),
+                     ("data/corpus", "corpus_cycle_*.jsonl")):
+        d = root / sub
+        if d.exists():
+            for p in d.glob(pat):
+                state[str(p.relative_to(root))] = p.read_bytes()
+    return state
+
+
+def _read_state_zip(zpath: Path) -> dict[str, bytes]:
+    state: dict[str, bytes] = {}
+    with zipfile.ZipFile(zpath) as z:
+        for name in z.namelist():
+            if "/repo/" in name:
+                rel = name.split("/repo/", 1)[1]
+            elif name.startswith("repo/"):
+                rel = name[len("repo/"):]
+            else:
+                continue
+            if rel.startswith("data/") and not rel.endswith("/"):
+                state[rel] = z.read(name)
+    return state
+
+
+def _find_state_source() -> tuple[str, Path] | None:
+    if (OUT / "state" / "data/ouro_state.json").exists():
+        return ("dir", OUT / "state")
+    zips = sorted(OUT.glob("*checkpoint*.zip"),
+                  key=lambda p: p.stat().st_mtime)
+    if zips:
+        return ("zip", zips[-1])
+    return None
+
+
+def _read_state(source: tuple[str, Path]) -> dict[str, bytes]:
+    kind, path = source
+    return _read_state_dir(path) if kind == "dir" else _read_state_zip(path)
+
+
+def _has_cycle_feedback(root: Path, cycle: int) -> bool:
+    d = root / "data/seeds"
+    return d.exists() and any(
+        p.name.startswith(f"feedback_cycle_{cycle:04d}")
+        for p in d.glob("feedback_cycle_*.txt"))
+
+
+def _clone_state_complete(last: int) -> bool:
+    if _clone_cycle_count() != last + 1:
+        return False
+    if not all((REPO / rel).exists()
+               for rel in _required_state_files(last)):
+        return False
+    return all(_has_cycle_feedback(REPO, i) for i in range(last + 1))
+
+
+def snapshot() -> None:
+    """Copy the clone's trajectory state into OUT/state/ after a cycle.
+
+    Run after stage 3. Unlike the notebook checkpoint zip (end-of-run in
+    practice), this lands in OUT every cycle, so any per-cycle sync of OUT
+    — Drive folder, pod disk, scp — carries enough state to resume.
+    """
+    summary = load_summary()
+    completed = _completed_cycles(summary)
+    if not completed:
+        log.warning("snapshot: no completed cycles yet — nothing to snapshot")
+        return
+    last = completed[-1]
+    cc = _clone_cycle_count()
+    if cc != last + 1:
+        log.warning(
+            "snapshot: clone cycle_count=%d, last completed cycle=%d — "
+            "state may be mid-cycle; snapshotting anyway", cc, last)
+    dst = OUT / "state"
+    copied: list[str] = []
+    for rel in _expected_state_files(last):
+        src = REPO / rel
+        if src.exists():
+            d = dst / rel
+            d.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy(src, d)
+            copied.append(rel)
+    # Feedback files: names vary by injection mode, so glob them; keep
+    # only cycles <= last (a partial file from an interrupted later cycle
+    # must not leak into the snapshot).
+    seeds_dir = REPO / "data/seeds"
+    if seeds_dir.exists():
+        for p in sorted(seeds_dir.glob("feedback_cycle_*.txt")):
+            rel = f"data/seeds/{p.name}"
+            idx = _cycle_index(rel)
+            if idx is not None and idx <= last:
+                d = dst / rel
+                d.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy(p, d)
+                copied.append(rel)
+    # Prune state files from cycles beyond `last` (stale leftovers if OUT
+    # was reused after a longer snapshot).
+    for sub, pat in (("data/seeds", "feedback_cycle_*.txt"),
+                     ("data/corpus", "corpus_cycle_*.jsonl")):
+        d = dst / sub
+        if d.exists():
+            for p in d.glob(pat):
+                idx = _cycle_index(str(p.relative_to(dst)))
+                if idx is not None and idx > last:
+                    p.unlink()
+    meta = {
+        "arm": ARM, "rng_seed": RNG_SEED, "last_completed_cycle": last,
+        "clone_cycle_count": cc, "files": copied, "written_at": time.time(),
+    }
+    (dst / "snapshot_meta.json").write_text(json.dumps(meta, indent=2))
+    log.info("SNAPSHOT DONE — %d state files for cycles 0..%d in %s",
+             len(copied), last, dst)
+
+
+def resume(dry_run: bool = False) -> dict:
+    """Restore trajectory state into the clone so the next stage 1 starts
+    at cycle (last completed + 1) instead of restarting from cycle 0."""
+    summary = load_summary()
+    completed = _completed_cycles(summary)
+    report: dict = {"arm": ARM, "rng_seed": RNG_SEED,
+                    "completed_cycles": completed,
+                    "clone_cycle_count_before": _clone_cycle_count()}
+    if not completed:
+        report["status"] = "nothing-to-resume"
+        log.info("resume: no completed cycles in summary — nothing to do")
+        print(json.dumps(report, indent=2))
+        return report
+    last = completed[-1]
+    if summary.get("arm") not in (None, ARM) or \
+            int(summary.get("rng_seed", RNG_SEED)) != RNG_SEED:
+        raise SystemExit(
+            f"resume: summary is arm={summary.get('arm')} "
+            f"seed={summary.get('rng_seed')} but r1_params.json says "
+            f"arm={ARM} seed={RNG_SEED} — refusing to mix trajectories")
+    if _clone_state_complete(last):
+        report["status"] = "already-restored"
+        log.info("resume: clone already holds state through cycle %d", last)
+        print(json.dumps(report, indent=2))
+        return report
+    source = _find_state_source()
+    if source is None:
+        raise SystemExit(
+            f"resume: summary holds {len(completed)} completed cycle(s) "
+            f"(0..{last}) but OUT has no trajectory state snapshot "
+            f"(looked for {OUT}/state/ and {OUT}/*checkpoint*.zip). "
+            "Missing state: " + ", ".join(_required_state_files(last)) +
+            ", plus the per-cycle feedback seed files under data/seeds/ "
+            "— the loose OUT files (summary/params/logs) never contained "
+            "the clone's data/ state, so this trajectory cannot be resumed "
+            "faithfully; it would have to restart from cycle 0.")
+    state = _read_state(source)
+    # Drop per-cycle files from cycles beyond `last` — they belong to an
+    # interrupted later cycle and must not leak into the restored state.
+    state = {rel: blob for rel, blob in state.items()
+             if (_cycle_index(rel) is None or _cycle_index(rel) <= last)}
+    # The watch's per-cycle Drive sync also drops a loose copy of the
+    # frozen groups directly in OUT; accept it as a fallback for that file.
+    frozen_rel = "data/corpus/frozen_eval_groups.json"
+    if frozen_rel not in state and (OUT / "frozen_eval_groups.json").exists():
+        state[frozen_rel] = (OUT / "frozen_eval_groups.json").read_bytes()
+    problems: list[str] = []
+    raw = state.get("data/ouro_state.json")
+    snap_state: dict = {}
+    if raw is None:
+        problems.append("data/ouro_state.json not in snapshot")
+    else:
+        try:
+            snap_state = json.loads(raw)
+            snap_cc = int(snap_state.get("cycle_count", -1))
+        except (json.JSONDecodeError, ValueError, TypeError):
+            snap_cc = -1
+        if snap_cc != last + 1:
+            problems.append(
+                f"snapshot ouro_state cycle_count={snap_cc}, expected "
+                f"{last + 1} (last completed cycle {last} + 1)")
+    for rel in _required_state_files(last):
+        if rel not in state:
+            problems.append(f"missing {rel}")
+    for i in range(last + 1):
+        if not any(rel.startswith(f"data/seeds/feedback_cycle_{i:04d}")
+                   for rel in state):
+            problems.append(f"missing feedback seed file(s) for cycle {i}")
+    # The snapshot's own ouro_state names the exact seed file(s) each
+    # cycle produced; every one of them must be in the snapshot.
+    for cyc in snap_state.get("cycles", []):
+        if int(cyc.get("cycle", 0)) > last:
+            continue
+        named = cyc.get("seed_files") or ([cyc["seed_file"]]
+                                          if cyc.get("seed_file") else [])
+        for rel in named:
+            if rel not in state:
+                problems.append(f"missing {rel} (named in ouro_state)")
+    if problems:
+        raise SystemExit(
+            f"resume: state source {source[1]} is incomplete for resuming "
+            f"after cycle {last}: " + "; ".join(problems))
+    report["source"] = str(source[1])
+    report["files"] = sorted(state)
+    if dry_run:
+        report["status"] = "would-resume"
+        report["next_cycle"] = last + 1
+        log.info("resume (dry-run): would restore %d files from %s; "
+                 "next cycle = %d", len(state), source[1], last + 1)
+        print(json.dumps(report, indent=2))
+        return report
+    for rel, blob in state.items():
+        d = REPO / rel
+        d.parent.mkdir(parents=True, exist_ok=True)
+        d.write_bytes(blob)
+    # Defensive cleanup: drop partial-cycle leftovers beyond `last` so a
+    # re-run of the interrupted cycle starts from exactly the snapshot.
+    for sub, pat in (("data/seeds", "feedback_cycle_*.txt"),
+                     ("data/corpus", "corpus_cycle_*.jsonl")):
+        d = REPO / sub
+        if d.exists():
+            for p in d.glob(pat):
+                idx = _cycle_index(str(p.relative_to(REPO)))
+                if idx is not None and idx > last:
+                    p.unlink()
+    if not (OUT / "run_state.json").exists():
+        human = sorted((REPO / "data/seeds").glob("seed*.txt"))
+        (OUT / "run_state.json").write_text(json.dumps({
+            "initialized": True, "arm": ARM, "rng_seed": RNG_SEED,
+            "seed_files": [p.name for p in human],
+        }, indent=2))
+    report["status"] = "resumed"
+    report["next_cycle"] = last + 1
+    report["clone_cycle_count_after"] = _clone_cycle_count()
+    log.info("RESUME DONE — restored %d files from %s; clone cycle_count=%d, "
+             "next cycle = %d", len(state), source[1],
+             report["clone_cycle_count_after"], last + 1)
+    print(json.dumps(report, indent=2))
+    return report
+
+
 if __name__ == "__main__":
     cmd = sys.argv[1]
-    {"init": init, "stage1": stage1, "stage2": stage2,
-     "stage3": stage3}[cmd]()
+    if cmd == "resume":
+        resume(dry_run="--dry-run" in sys.argv[2:])
+    elif cmd == "snapshot":
+        snapshot()
+    else:
+        {"init": init, "stage1": stage1, "stage2": stage2,
+         "stage3": stage3}[cmd]()
