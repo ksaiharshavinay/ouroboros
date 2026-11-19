@@ -49,6 +49,15 @@ MODEL_DIR = Path(os.environ.get("OURO_TRAIN_OUTPUT_DIR", "data/model"))
 LOG_FILE = Path("data/research_log.jsonl")
 BUDGET_MINUTES = 5
 
+# Base-model eval cache (main() only): the base model and the frozen
+# eval rows are fixed within a trajectory, so the base eval result is
+# cached under data/corpus/ — the directory the trajectory reset wipes,
+# so a fresh trajectory never inherits a stale value. The key covers
+# the base model, MAX_SEQ_LEN, the eval device and dtype, and the
+# exact rows evaluated, in order; on ANY doubt the value is recomputed.
+BASE_EVAL_CACHE = Path("data/corpus/base_eval_cache.json")
+EVAL_LIMIT = 50
+
 # --- Hyperparameters ---
 LEARNING_RATE = 2e-4
 # Env-overridable for memory-constrained CPU runs (same precedent as
@@ -257,6 +266,13 @@ def fine_tune(
         "trainable_params": trainable,
         "num_train_examples": len(train_data),
         "trained": True,
+        # In-memory handles so main() can evaluate through the model it
+        # just trained instead of reloading base+adapter from disk
+        # twice. NOT JSON-serialisable: main() pops them before the
+        # result is logged/saved, and log_experiment()/save_checkpoint()
+        # drop them defensively as well.
+        "model": model,
+        "tokenizer": tokenizer,
     }
     logger.info(
         "[train] Done: %d steps, loss %s -> %s, adapter sha256 %s",
@@ -268,12 +284,18 @@ def fine_tune(
     return result
 
 
-def _eval_nll(model, tokenizer, eval_data: list[dict], max_len: int, limit: int = 50) -> float:
-    """Mean token-level NLL over completion tokens (lower = better)."""
+def _eval_nll(model, tokenizer, eval_data: list[dict], max_len: int, limit: int = EVAL_LIMIT) -> float:
+    """Mean token-level NLL over completion tokens (lower = better).
+
+    Tensors are created on the model's own device: eval runs wherever
+    the model lives (CUDA when training used the GPU, CPU otherwise),
+    fp32 in both cases.
+    """
     import torch as _torch
 
     model.eval()
     _torch.set_grad_enabled(False)
+    device = next(model.parameters()).device
     total_nll, total_tokens = 0.0, 0
     for ex in eval_data[:limit]:
         prompt_ids = tokenizer(ex["prompt"], add_special_tokens=True)["input_ids"]
@@ -282,8 +304,8 @@ def _eval_nll(model, tokenizer, eval_data: list[dict], max_len: int, limit: int 
         labels = ([-100] * len(prompt_ids) + completion_ids)[:max_len]
         if all(t == -100 for t in labels):
             continue
-        ids = _torch.tensor([input_ids], dtype=_torch.long)
-        lab = _torch.tensor([labels], dtype=_torch.long)
+        ids = _torch.tensor([input_ids], dtype=_torch.long, device=device)
+        lab = _torch.tensor([labels], dtype=_torch.long, device=device)
         out = model(input_ids=ids, labels=lab)
         n_tokens = int((lab != -100).sum().item())
         total_nll += float(out.loss.item()) * n_tokens
@@ -317,7 +339,27 @@ def evaluate(
     model = AutoModelForCausalLM.from_pretrained(base_model, dtype=torch.float32)
     if adapter_dir:
         model = PeftModel.from_pretrained(model, str(adapter_dir))
+    # Eval on the GPU when there is one (fp32 either way — the device
+    # changes floating-point summation order only, which is why the
+    # base-eval cache key includes the device).
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    model = model.to(device)
     return _eval_nll(model, tokenizer, eval_data, MAX_SEQ_LEN)
+
+
+def _detailed_from_loss(
+    loss: float,
+    eval_data: list[dict],
+    base_model: str,
+    adapter_dir: str | Path | None,
+) -> dict:
+    return {
+        "loss": loss,
+        "perplexity": math.exp(loss) if loss == loss and loss < 50 else float("inf"),
+        "num_eval_examples": min(len(eval_data), EVAL_LIMIT),
+        "base_model": base_model,
+        "adapter_dir": str(adapter_dir) if adapter_dir else None,
+    }
 
 
 def evaluate_detailed(
@@ -326,19 +368,79 @@ def evaluate_detailed(
     adapter_dir: str | Path | None = None,
 ) -> dict:
     loss = evaluate(eval_data, base_model=base_model, adapter_dir=adapter_dir)
-    return {
-        "loss": loss,
-        "perplexity": math.exp(loss) if loss == loss and loss < 50 else float("inf"),
-        "num_eval_examples": min(len(eval_data), 50),
-        "base_model": base_model,
-        "adapter_dir": str(adapter_dir) if adapter_dir else None,
-    }
+    return _detailed_from_loss(loss, eval_data, base_model, adapter_dir)
+
+
+def _base_eval_cache_key(
+    eval_data: list[dict], base_model: str, device: str, dtype: str
+) -> str:
+    """Content key for the base-eval cache: everything the value
+    depends on — base model, sequence length, eval device and dtype,
+    and the exact rows _eval_nll will score, in order."""
+    payload = json.dumps(
+        {
+            "base_model": base_model,
+            "max_seq_len": MAX_SEQ_LEN,
+            "device": device,
+            "dtype": dtype,
+            "eval_rows": eval_data[:EVAL_LIMIT],
+        },
+        sort_keys=True,
+        default=str,
+    )
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def _base_eval_in_memory(model, tokenizer, eval_data: list[dict],
+                         base_model: str) -> dict:
+    """Base-model eval for main(), through the just-trained model.
+
+    Cache-first: a hit on _base_eval_cache_key skips the eval entirely.
+    On a miss the base numbers come from the in-memory PeftModel with
+    its adapter disabled — the same base weights a fresh load would
+    score (LoRA training never touches them, LORA_DROPOUT=0), on the
+    same device the trained eval uses. An unreadable or mismatched
+    cache is ignored and the value recomputed; NaN is never cached.
+    """
+    param = next(model.parameters())
+    device = param.device.type  # "cuda" / "cpu" — never "cuda:0" vs "cuda"
+    dtype = str(param.dtype).replace("torch.", "")
+    key = _base_eval_cache_key(eval_data, base_model, device, dtype)
+    if BASE_EVAL_CACHE.exists():
+        try:
+            cache = json.loads(BASE_EVAL_CACHE.read_text())
+            if cache.get("key") == key:
+                logger.info("[train] Base eval served from cache %s",
+                            BASE_EVAL_CACHE)
+                return {
+                    "loss": float(cache["loss"]),
+                    "perplexity": float(cache["perplexity"]),
+                    "num_eval_examples": min(len(eval_data), EVAL_LIMIT),
+                    "base_model": base_model,
+                    "adapter_dir": None,
+                }
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+            logger.warning("[train] Base eval cache unreadable — recomputing")
+    with model.disable_adapter():
+        loss = _eval_nll(model, tokenizer, eval_data, MAX_SEQ_LEN)
+    detailed = _detailed_from_loss(loss, eval_data, base_model, None)
+    if loss == loss:  # never cache NaN
+        try:
+            BASE_EVAL_CACHE.parent.mkdir(parents=True, exist_ok=True)
+            BASE_EVAL_CACHE.write_text(json.dumps(
+                {"key": key, "loss": detailed["loss"],
+                 "perplexity": detailed["perplexity"]}, indent=2))
+        except OSError as exc:
+            logger.warning("[train] Could not write base eval cache: %s", exc)
+    return detailed
 
 
 def log_experiment(result: dict) -> None:
     LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    serialisable = {k: v for k, v in result.items()
+                    if k not in ("model", "tokenizer")}
     with LOG_FILE.open("a") as f:
-        f.write(json.dumps({**result, "timestamp": time.time()}) + "\n")
+        f.write(json.dumps({**serialisable, "timestamp": time.time()}) + "\n")
 
 
 def save_checkpoint(result: dict) -> Path:
@@ -366,7 +468,8 @@ def save_checkpoint(result: dict) -> Path:
     shutil.copytree(staging, checkpoint_dir)
 
     metadata = {
-        **{k: v for k, v in result.items() if k != "adapter_dir"},
+        **{k: v for k, v in result.items()
+           if k not in ("adapter_dir", "model", "tokenizer")},
         # Hoist base_model to the top level: main() nests it inside
         # train_result, but inference reads it from the metadata root.
         "base_model": result.get("base_model")
@@ -410,10 +513,19 @@ def main() -> None:
         max_steps=max_steps,
     )
 
-    eval_before = evaluate_detailed(eval_data, base_model=base_model)
-    eval_after = evaluate_detailed(
-        eval_data, base_model=base_model, adapter_dir=train_result["adapter_dir"]
+    # Evaluate through the in-memory trained model instead of loading
+    # base+adapter from disk twice more: the adapter fine_tune() saved
+    # is an fp32 copy of exactly these weights, so the numbers are the
+    # ones the reload path produced. Eval stays fp32 and runs on the
+    # training device (CUDA when available). The base numbers come from
+    # the same model with its adapter disabled, cache permitting.
+    model = train_result.pop("model")
+    tokenizer = train_result.pop("tokenizer")
+    eval_after = _detailed_from_loss(
+        _eval_nll(model, tokenizer, eval_data, MAX_SEQ_LEN),
+        eval_data, base_model, train_result["adapter_dir"],
     )
+    eval_before = _base_eval_in_memory(model, tokenizer, eval_data, base_model)
     logger.info("Eval loss (base):    %.4f (ppl %.2f)", eval_before["loss"], eval_before["perplexity"])
     logger.info("Eval loss (trained): %.4f (ppl %.2f)", eval_after["loss"], eval_after["perplexity"])
 

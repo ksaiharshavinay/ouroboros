@@ -113,7 +113,15 @@ class OuroInferenceEngine:
         self._tokenizer = AutoTokenizer.from_pretrained(self.checkpoint_dir)
         if self._tokenizer.pad_token is None:
             self._tokenizer.pad_token = self._tokenizer.eos_token
-        base = AutoModelForCausalLM.from_pretrained(base_model, dtype=torch.float32)
+        # Generation on the GPU when there is one, fp32 either way;
+        # CPU fallback keeps the historical behaviour on GPU-less boxes.
+        cuda = getattr(torch, "cuda", None)
+        if cuda is not None and cuda.is_available():
+            base = AutoModelForCausalLM.from_pretrained(
+                base_model, dtype=torch.float32, device_map="cuda")
+        else:
+            base = AutoModelForCausalLM.from_pretrained(
+                base_model, dtype=torch.float32)
         self._model = PeftModel.from_pretrained(base, str(self.checkpoint_dir))
         self._model.eval()
         self._backend = "local"
@@ -149,6 +157,8 @@ class OuroInferenceEngine:
 
         text = f"{context}\n\n{prompt}" if context else prompt
         inputs = self._tokenizer(text, return_tensors="pt")
+        device = next(self._model.parameters()).device
+        inputs = {k: v.to(device) for k, v in inputs.items()}
         with torch.no_grad():
             output = self._model.generate(
                 **inputs,

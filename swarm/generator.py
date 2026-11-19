@@ -13,6 +13,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 from pathlib import Path
 from typing import Any
 
@@ -65,17 +66,29 @@ class OuroborosSwarmGenerator(BaseSwarmAdapter):
 
         self._graph_builder.open(cycle=cycle)
         try:
+            # Per-phase timings, logged as ONE summary line per cycle:
+            # they turn the efficiency review's estimates (simulation
+            # vs per-turn enrichment vs personas) into measured numbers
+            # on the first rented cycle. perf_counter only — no effect
+            # on outputs.
+            timings: dict[str, float] = {}
+
             # Stage 1: Build knowledge graph
+            t0 = time.perf_counter()
             self._graph_builder.build_from_docs(seed_docs)
+            timings["graph_build"] = time.perf_counter() - t0
             top_entities = self._graph_builder.get_top_entities(n=20)
 
             # Stage 2: Generate personas
+            t0 = time.perf_counter()
             personas = self._persona_gen.generate(
                 n=self.config.num_agents, top_entities=top_entities
             )
+            timings["personas"] = time.perf_counter() - t0
             oasis_personas = PersonaGenerator.to_oasis_format(personas)
 
             # Stage 3: Run OASIS simulation
+            t0 = time.perf_counter()
             turns = self._run_async(
                 self._run_oasis(
                     oasis_personas,
@@ -84,23 +97,39 @@ class OuroborosSwarmGenerator(BaseSwarmAdapter):
                     cycle=cycle,
                 )
             )
+            timings["simulation"] = time.perf_counter() - t0
             self._last_turns = turns
 
             # Stage 3b (Phase 2): provenance enrichment — record which
             # turn produced which entity in the knowledge graph. Guarded:
             # enrichment failure must never fail the simulation.
+            t0 = time.perf_counter()
             try:
                 self._graph_builder.build_from_turns(
                     turns, source_ref=f"corpus_cycle_{cycle:04d}"
                 )
             except Exception as exc:
                 logger.warning("[swarm] Turn graph enrichment failed: %s", exc)
+            timings["enrichment"] = time.perf_counter() - t0
 
             # Stage 4: Export corpus
+            t0 = time.perf_counter()
             corpus_path = self._export_corpus(turns, cycle=cycle)
+            timings["export"] = time.perf_counter() - t0
 
             # Stage 5: Generate prediction report
+            t0 = time.perf_counter()
             self._last_report = self._report_gen.generate(turns, top_entities)
+            timings["report"] = time.perf_counter() - t0
+
+            logger.info(
+                "[swarm] Cycle %d stage timings (s): graph_build=%.1f "
+                "personas=%.1f simulation=%.1f enrichment=%.1f "
+                "export=%.1f report=%.1f",
+                cycle, timings["graph_build"], timings["personas"],
+                timings["simulation"], timings["enrichment"],
+                timings["export"], timings["report"],
+            )
 
         finally:
             self._graph_builder.close()

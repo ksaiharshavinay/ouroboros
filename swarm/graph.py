@@ -116,6 +116,34 @@ class GraphBuilder:
     # Graph construction
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # Transactions
+    # ------------------------------------------------------------------
+    # Each build_* call inserts inside ONE transaction: the previous
+    # one-statement-per-transaction flow paid a WAL commit per node and
+    # edge (thousands per cycle). Extraction (LLM calls) happens BEFORE
+    # the transaction opens, so the transaction itself is pure inserts.
+    # Inside it there is deliberately no try/except around statements:
+    # a failed statement ends a kuzu transaction, so catching one and
+    # carrying on would silently write a partial graph — failures
+    # surface to the caller instead (the generator guards enrichment).
+
+    def _begin(self) -> None:
+        if self._conn is not None:
+            self._conn.execute("BEGIN TRANSACTION")
+
+    def _commit(self) -> None:
+        if self._conn is not None:
+            self._conn.execute("COMMIT")
+
+    def _rollback_quiet(self) -> None:
+        if self._conn is None:
+            return
+        try:
+            self._conn.execute("ROLLBACK")
+        except Exception:
+            pass  # a failed statement may already have ended the txn
+
     def build_from_docs(self, docs: list[Path]) -> None:
         """Extract entities from docs and insert them into the graph.
 
@@ -124,11 +152,20 @@ class GraphBuilder:
         entity, and entity--entity co-occurrence (Related) for every pair
         of entities extracted from the same document.
         """
+        extracted = []
         for doc in docs:
             text = doc.read_text(encoding="utf-8", errors="replace")
-            entities = self._llm_extract(text)
-            self._insert_entities(entities)
-            self._insert_unit_edges(entities, source_kind="seed_doc", source_ref=doc.name)
+            extracted.append((doc.name, self._llm_extract(text)))
+        self._begin()
+        try:
+            for doc_name, entities in extracted:
+                self._insert_entities(entities)
+                self._insert_unit_edges(
+                    entities, source_kind="seed_doc", source_ref=doc_name)
+            self._commit()
+        except Exception:
+            self._rollback_quiet()
+            raise
 
     def build_from_turns(self, turns: list[dict[str, Any]], source_ref: str) -> None:
         """
@@ -137,9 +174,12 @@ class GraphBuilder:
         is a source unit, so the graph records which turn produced which
         entity and which entities co-occurred within a turn.
 
-        Per-turn failures are logged and skipped — graph enrichment must
-        never fail the simulation that produced the turns.
+        Inserts run in a single transaction: a failed insert surfaces
+        (and rolls the enrichment back) rather than skipping one turn —
+        the generator's guard is what keeps an enrichment failure from
+        failing the simulation that produced the turns.
         """
+        extracted = []
         for idx, turn in enumerate(turns):
             content = (turn.get("content") or "").strip()
             if not content:
@@ -148,12 +188,17 @@ class GraphBuilder:
                 f"{source_ref}:r{turn.get('round', 0)}"
                 f":a{turn.get('agent_id', 0)}:t{idx}"
             )
-            try:
-                entities = self._llm_extract(content)
+            extracted.append((ref, self._llm_extract(content)))
+        self._begin()
+        try:
+            for ref, entities in extracted:
                 self._insert_entities(entities)
-                self._insert_unit_edges(entities, source_kind="turn", source_ref=ref)
-            except Exception as exc:
-                logger.warning("[graph] Turn %d graph enrichment failed: %s", idx, exc)
+                self._insert_unit_edges(
+                    entities, source_kind="turn", source_ref=ref)
+            self._commit()
+        except Exception:
+            self._rollback_quiet()
+            raise
 
     def _llm_extract(self, text: str) -> list[dict[str, str]]:
         """Ask the LLM to extract named entities from text. Retries once on parse failure."""
@@ -249,20 +294,25 @@ class GraphBuilder:
         return "s_" + hashlib.md5(raw_id.encode()).hexdigest()[:12]
 
     def _insert_entities(self, entities: list[dict[str, str]]) -> None:
-        """Insert entities using CREATE + skip on duplicate (safe across KuzuDB versions)."""
+        """Insert entities with MERGE ... ON CREATE SET: the first
+        write wins (same end state as the old CREATE-and-skip-on-
+        duplicate) without spending an exception per duplicate.
+
+        No-ops when the graph is not open (extraction-only use), like
+        _insert_unit_edges."""
+        if self._conn is None:
+            return
         for ent in entities:
             name = ent.get("name", "").strip()
             etype = ent.get("type", "unknown").strip()
             if not name:
                 continue
             eid = self._entity_id(name)
-            try:
-                self._conn.execute(
-                    "CREATE (e:Entity {id: $id, name: $name, type: $type})",
-                    parameters={"id": eid, "name": name, "type": etype},
-                )
-            except Exception:
-                pass  # Skip duplicates
+            self._conn.execute(
+                "MERGE (e:Entity {id: $id}) "
+                "ON CREATE SET e.name = $name, e.type = $type",
+                parameters={"id": eid, "name": name, "type": etype},
+            )
 
     def _insert_unit_edges(
         self, entities: list[dict[str, str]], source_kind: str, source_ref: str
@@ -292,30 +342,31 @@ class GraphBuilder:
             return
 
         sid = self._source_id(source_kind, source_ref)
-        try:
-            self._conn.execute(
-                "CREATE (s:Source {id: $id, kind: $kind, ref: $ref, cycle: $cycle})",
-                parameters={
-                    "id": sid, "kind": source_kind,
-                    "ref": source_ref, "cycle": self._cycle,
-                },
-            )
-        except Exception:
-            pass  # Source already recorded (same unit re-processed)
+        # MERGE, first write wins — same end state as CREATE-and-skip
+        # when the same unit is re-processed, without the exception.
+        self._conn.execute(
+            "MERGE (s:Source {id: $id}) "
+            "ON CREATE SET s.kind = $kind, s.ref = $ref, s.cycle = $cycle",
+            parameters={
+                "id": sid, "kind": source_kind,
+                "ref": source_ref, "cycle": self._cycle,
+            },
+        )
 
+        # Edges stay plain CREATE — Related/DerivedFrom are multigraph
+        # edges (one per source unit per pair), so duplicates are data,
+        # not conflicts. No try/except: inside the caller's transaction
+        # a failed statement must surface, not be logged and skipped.
         for ent in names:
             eid = self._entity_id(ent["name"])
-            try:
-                self._conn.execute(
-                    "MATCH (e:Entity {id: $eid}), (s:Source {id: $sid}) "
-                    "CREATE (e)-[:DerivedFrom {kind: $kind, cycle: $cycle}]->(s)",
-                    parameters={
-                        "eid": eid, "sid": sid,
-                        "kind": "mention", "cycle": self._cycle,
-                    },
-                )
-            except Exception as exc:
-                logger.debug("[graph] DerivedFrom insert failed: %s", exc)
+            self._conn.execute(
+                "MATCH (e:Entity {id: $eid}), (s:Source {id: $sid}) "
+                "CREATE (e)-[:DerivedFrom {kind: $kind, cycle: $cycle}]->(s)",
+                parameters={
+                    "eid": eid, "sid": sid,
+                    "kind": "mention", "cycle": self._cycle,
+                },
+            )
 
         # Co-occurrence: one edge per unordered pair, direction fixed by
         # entity id so a pair is stored once per source unit.
@@ -324,18 +375,15 @@ class GraphBuilder:
             for j in range(i + 1, len(ordered)):
                 a_id = self._entity_id(ordered[i]["name"])
                 b_id = self._entity_id(ordered[j]["name"])
-                try:
-                    self._conn.execute(
-                        "MATCH (a:Entity {id: $a}), (b:Entity {id: $b}) "
-                        "CREATE (a)-[:Related {weight: 1.0, kind: 'co_occurrence', "
-                        "source: $source, cycle: $cycle}]->(b)",
-                        parameters={
-                            "a": a_id, "b": b_id,
-                            "source": source_ref, "cycle": self._cycle,
-                        },
-                    )
-                except Exception as exc:
-                    logger.debug("[graph] Related insert failed: %s", exc)
+                self._conn.execute(
+                    "MATCH (a:Entity {id: $a}), (b:Entity {id: $b}) "
+                    "CREATE (a)-[:Related {weight: 1.0, kind: 'co_occurrence', "
+                    "source: $source, cycle: $cycle}]->(b)",
+                    parameters={
+                        "a": a_id, "b": b_id,
+                        "source": source_ref, "cycle": self._cycle,
+                    },
+                )
 
     # ------------------------------------------------------------------
     # Queries

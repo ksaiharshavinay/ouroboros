@@ -66,6 +66,24 @@ logging.basicConfig(
 )
 log = logging.getLogger("r1-driver")
 
+# Stage logs ran to 24–29 MB per cycle, almost all of it library
+# internals: the installed camel-oasis sets its social.* loggers to
+# DEBUG (each agent's full observation prompt, every step) and httpx
+# logs every Ollama request at INFO, and all of it propagates to the
+# root handler. Floor the root handler at INFO (drops the DEBUG spam)
+# and raise the noisy libraries to WARNING. social.agent and
+# social.twitter carry their OWN DEBUG level — verified against the
+# camel-oasis installed in the repo venv — which a level set on the
+# parent "social" logger cannot override, so they are named
+# explicitly. The driver's own lines and the ouro/swarm/autoresearch
+# loggers are untouched.
+if logging.getLogger().handlers:
+    logging.getLogger().handlers[0].setLevel(logging.INFO)
+for _lib_logger in ("social", "social.agent", "social.twitter",
+                    "social.rec", "oasis", "camel", "httpx", "openai",
+                    "urllib3"):
+    logging.getLogger(_lib_logger).setLevel(logging.WARNING)
+
 from ouro.config import OuroConfig  # noqa: E402
 from ouro.pipeline import OuroPipeline  # noqa: E402
 
@@ -790,15 +808,41 @@ def snapshot() -> None:
     dst = OUT / "state"
     if tmp.exists():
         shutil.rmtree(tmp)
+    # Files that change every cycle are always re-copied. Anything else
+    # (earlier cycles' corpus files above all) is skipped when the live
+    # snapshot already holds the identical file — same size and mtime —
+    # by hardlinking it into the new snapshot instead of copying the
+    # bytes again; on a Drive/FUSE-backed OUT every re-copy is a
+    # re-upload. copy2 preserves the source mtime, so an unchanged file
+    # keeps comparing equal on later snapshots. Either way, the sha256
+    # recorded in snapshot_meta.json covers EVERY snapshotted file.
+    _always_copy = {
+        "data/ouro_state.json",
+        "data/gate_decisions.jsonl",
+        "data/model/checkpoint/checkpoint_metadata.json",
+    }
     copied: list[str] = []
     hashes: dict[str, str] = {}
     for rel in rels:
-        blob = (REPO / rel).read_bytes()
+        src = REPO / rel
         d = tmp / rel
         d.parent.mkdir(parents=True, exist_ok=True)
-        d.write_bytes(blob)
+        linked = False
+        if rel not in _always_copy:
+            live = dst / rel
+            if live.exists():
+                s_src, s_live = src.stat(), live.stat()
+                if s_src.st_size == s_live.st_size and \
+                        s_src.st_mtime_ns == s_live.st_mtime_ns:
+                    try:
+                        os.link(live, d)
+                        linked = True
+                    except OSError:
+                        linked = False
+        if not linked:
+            shutil.copy2(src, d)
         copied.append(rel)
-        hashes[rel] = _sha256(blob)
+        hashes[rel] = _sha256(d.read_bytes())
     meta = {
         "arm": ARM, "rng_seed": RNG_SEED, "last_completed_cycle": last,
         "clone_cycle_count": cc, "files": copied, "sha256": hashes,

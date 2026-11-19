@@ -202,6 +202,68 @@ def run_driver(args: argparse.Namespace, out: Path, cmd: str,
                          f"see {log_path}")
 
 
+def probe_hardware(args: argparse.Namespace) -> dict:
+    """Execution-hardware record for r1_params.json (paper methods).
+
+    Probed through the ML venv interpreter, which is the one that runs
+    the stages. Records what is true on this box: the GPU name and
+    torch version, the device eval/inference will use ("cuda" when a
+    GPU is present, else "cpu"), and the dtype — fp32 throughout.
+    """
+    code = (
+        "import json, torch;"
+        "print(json.dumps({"
+        "'torch_version': torch.__version__,"
+        "'cuda_available': torch.cuda.is_available(),"
+        "'gpu_name': (torch.cuda.get_device_name(0)"
+        "             if torch.cuda.is_available() else None)}))"
+    )
+    info: dict = {}
+    try:
+        p = subprocess.run([args.venv_python, "-c", code],
+                           capture_output=True, text=True,
+                           errors="replace", timeout=180)
+        if p.returncode == 0 and p.stdout.strip():
+            info = json.loads(p.stdout.strip().splitlines()[-1])
+    except Exception as exc:
+        print(f"[r1_run] hardware probe failed ({exc}) — recording "
+              "nulls")
+    cuda = bool(info.get("cuda_available"))
+    return {
+        "gpu_name": info.get("gpu_name"),
+        "torch_version": info.get("torch_version"),
+        "eval_device": "cuda" if cuda else "cpu",
+        "inference_device": "cuda" if cuda else "cpu",
+        "dtype": "float32",
+    }
+
+
+def predownload_base_model(args: argparse.Namespace) -> None:
+    """Download the base model into the HF cache once, then take the
+    driver subprocesses offline.
+
+    Without this, every fresh stage process pays Hub revision checks
+    on every from_pretrained call (and a slow/rate-limited Hub stalls
+    billed GPU time). If the download fails — no network on the box —
+    warn and continue ONLINE rather than aborting: the stages then
+    fetch from the Hub themselves, exactly as before.
+    """
+    code = ("from huggingface_hub import snapshot_download;"
+            f"snapshot_download({args.train_model!r})")
+    print(f"[r1_run] pre-downloading base model {args.train_model}")
+    p = subprocess.run([args.venv_python, "-c", code],
+                       capture_output=True, text=True, errors="replace")
+    if p.returncode != 0:
+        print("[r1_run] WARNING: base-model pre-download failed — "
+              "continuing ONLINE; driver stages will use the Hub "
+              "directly")
+        return
+    os.environ["HF_HUB_OFFLINE"] = "1"
+    os.environ["TRANSFORMERS_OFFLINE"] = "1"
+    print("[r1_run] base model cached — HF_HUB_OFFLINE=1 and "
+          "TRANSFORMERS_OFFLINE=1 for the driver stages")
+
+
 def completed_cycles(out: Path) -> set[int]:
     p = out / "r1_summary.json"
     if not p.exists():
@@ -263,6 +325,14 @@ def main() -> None:
     os.environ["OURO_R1_OUT"] = str(out)
     os.environ.setdefault("OLLAMA_HOST", "127.0.0.1:11434")
     os.environ.setdefault("OLLAMA_NUM_PARALLEL", "4")
+    # Keep the swarm model resident across stages: stages 2–3 can run
+    # longer than Ollama's 5-minute default keep-alive, and a reload
+    # per cycle is pure waste on a 24 GB card with headroom to spare.
+    os.environ.setdefault("OLLAMA_KEEP_ALIVE", "-1")
+    # Single-GPU guarantee: HF Trainer would otherwise DataParallel
+    # across every visible device, silently multiplying the effective
+    # batch size (and the bill) on a multi-GPU pod.
+    os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0")
     if Path("/workspace").exists():
         # Keep model weights on the persistent volume, not the pod's
         # ephemeral container disk (see module docstring).
@@ -301,6 +371,17 @@ def main() -> None:
         params_path.write_text(json.dumps(params, indent=2))
         print(f"[r1_run] wrote {params_path}: {params}")
 
+    if not args.dry_run:
+        # Provenance for the paper's methods section, recorded per
+        # run: which GPU/torch executed this trajectory and on what
+        # device/dtype eval and inference ran. Merged into the params
+        # file without touching the trajectory keys checked above.
+        hardware = probe_hardware(args)
+        merged = json.loads(params_path.read_text())
+        merged["hardware"] = hardware
+        params_path.write_text(json.dumps(merged, indent=2))
+        print(f"[r1_run] hardware recorded in {params_path}: {hardware}")
+
     if args.dry_run:
         print("[r1_run] dry-run: resume detection only")
         p = subprocess.run([args.venv_python, str(DRIVER), "resume",
@@ -326,6 +407,7 @@ def main() -> None:
     if args.resume:
         run_driver(args, out, "resume", "resume.log")
     run_driver(args, out, "init", "init.log")
+    predownload_base_model(args)
 
     done = completed_cycles(out)
     for cycle in range(args.cycles):
