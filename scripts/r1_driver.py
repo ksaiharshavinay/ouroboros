@@ -27,6 +27,7 @@ Nothing here writes outside the clone and OUT.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import math
@@ -118,21 +119,34 @@ def current_cycle_record(summary: dict, cycle: int) -> dict:
 # ---------------------------------------------------------------- init
 def init() -> None:
     state_path = OUT / "run_state.json"
-    if state_path.exists():
-        # Trap: OUT survived a dead runtime (or was restored from a
-        # snapshot) but the clone is a fresh checkout — run_state says
-        # "initialized" while the clone's cycle counter is 0 and the
-        # summary already holds completed cycles. Silently no-oping here
-        # would restart the trajectory at cycle 0 and overwrite the
-        # completed cycles' records, so restore the trajectory instead.
-        completed = _completed_cycles(load_summary())
-        if completed and _clone_cycle_count() == 0:
+    # The guard is keyed on the SUMMARY's completed cycles, not on
+    # run_state.json existing: a partial sync/copy of OUT can lose
+    # run_state.json while the summary survives, and taking the reset
+    # path then would wipe the clone's corpus/feedback state for a
+    # trajectory that is still resumable from its snapshot. So: whenever
+    # the summary holds completed cycles, init NEVER resets — it either
+    # confirms the clone already holds that state or resumes it.
+    completed = _completed_cycles(load_summary())
+    if completed:
+        last = completed[-1]
+        if not _clone_state_complete(last):
             log.warning(
-                "init: OUT holds %d completed cycle(s) but the clone is "
-                "fresh — resuming instead of resetting", len(completed))
+                "init: OUT holds %d completed cycle(s) but the clone "
+                "does not hold that state — resuming instead of "
+                "resetting", len(completed))
             resume()
         else:
-            log.info("init already done — %s exists, skipping reset", state_path)
+            if not state_path.exists():
+                human = sorted((REPO / "data/seeds").glob("seed*.txt"))
+                state_path.write_text(json.dumps({
+                    "initialized": True, "arm": ARM, "rng_seed": RNG_SEED,
+                    "seed_files": [p.name for p in human],
+                }, indent=2))
+            log.info("init: clone already holds state through cycle %d "
+                     "— skipping reset", last)
+        return
+    if state_path.exists():
+        log.info("init already done — %s exists, skipping reset", state_path)
         return
     data = REPO / "data"
     seeds = data / "seeds"
@@ -163,6 +177,7 @@ def init() -> None:
         "initialized": True, "arm": ARM, "rng_seed": RNG_SEED,
         "seed_files": [p.name for p in human],
     }, indent=2))
+    _write_owner()
     log.info("INIT DONE — fresh %s trajectory, seeds=%s",
              ARM, [p.name for p in human])
 
@@ -418,6 +433,19 @@ def _read_state_dir(root: Path) -> dict[str, bytes]:
     return state
 
 
+def _is_state_rel(rel: str) -> bool:
+    """Allowlist: fixed state files + per-cycle feedback/corpus files.
+
+    Anything else in a checkpoint zip (LoRA adapter weights, the kuzu
+    graph, train/eval.jsonl, ...) is a per-cycle output or a derived
+    cache, NOT trajectory state, and is never restored.
+    """
+    if rel in FIXED_STATE_FILES:
+        return True
+    return any(rel.startswith(f"{sub}/{prefix}")
+               for sub, prefix in _CYCLE_PATTERNS)
+
+
 def _read_state_zip(zpath: Path) -> dict[str, bytes]:
     state: dict[str, bytes] = {}
     with zipfile.ZipFile(zpath) as z:
@@ -428,24 +456,239 @@ def _read_state_zip(zpath: Path) -> dict[str, bytes]:
                 rel = name[len("repo/"):]
             else:
                 continue
-            if rel.startswith("data/") and not rel.endswith("/"):
-                state[rel] = z.read(name)
+            # Zip-slip guard: never let an entry escape the repo tree,
+            # and restore only allowlisted state files.
+            if rel.endswith("/") or ".." in Path(rel).parts or \
+                    Path(rel).is_absolute() or not _is_state_rel(rel):
+                continue
+            state[rel] = z.read(name)
     return state
 
 
-def _find_state_source() -> tuple[str, Path] | None:
-    if (OUT / "state" / "data/ouro_state.json").exists():
-        return ("dir", OUT / "state")
-    zips = sorted(OUT.glob("*checkpoint*.zip"),
-                  key=lambda p: p.stat().st_mtime)
-    if zips:
-        return ("zip", zips[-1])
+def _sha256(blob: bytes) -> str:
+    return hashlib.sha256(blob).hexdigest()
+
+
+def _write_owner() -> None:
+    """Mark the clone's data/ as belonging to this trajectory.
+
+    Written by init (fresh reset), snapshot and resume. A clone whose
+    owner marker names a different arm/seed/OUT is another trajectory's
+    checkout and must never be mistaken for this one.
+    """
+    data = REPO / "data"
+    data.mkdir(parents=True, exist_ok=True)
+    (data / ".r1_owner.json").write_text(json.dumps({
+        "arm": ARM, "rng_seed": RNG_SEED, "out": str(OUT),
+    }, indent=2))
+
+
+def _clone_owner_ok() -> bool:
+    p = REPO / "data/.r1_owner.json"
+    if not p.exists():
+        return False
+    try:
+        owner = json.loads(p.read_text())
+        return owner.get("arm") == ARM and \
+            int(owner.get("rng_seed", -1)) == RNG_SEED and \
+            owner.get("out") == str(OUT)
+    except (json.JSONDecodeError, ValueError, TypeError):
+        return False
+
+
+def _state_problems(state: dict[str, bytes],
+                    summary_last: int) -> tuple[int | None, list[str]]:
+    """Validate a candidate state snapshot against the summary.
+
+    Returns (snap_last, problems): snap_last is the snapshot's own last
+    completed cycle (its ouro_state cycle_count - 1). A snapshot ahead
+    of the summary is rejected; one behind it is fine — resume rolls
+    the summary back to it (see resume()).
+    """
+    problems: list[str] = []
+    raw = state.get("data/ouro_state.json")
+    if raw is None:
+        return None, ["data/ouro_state.json not in snapshot"]
+    try:
+        snap_state = json.loads(raw)
+        snap_cc = int(snap_state.get("cycle_count", -1))
+    except (json.JSONDecodeError, ValueError, TypeError):
+        return None, ["snapshot ouro_state.json unreadable or "
+                      "cycle_count not an int"]
+    snap_last = snap_cc - 1
+    if snap_last < 0:
+        problems.append(f"snapshot cycle_count={snap_cc} — no completed "
+                        "cycle to resume from")
+        return None, problems
+    if snap_last > summary_last:
+        problems.append(
+            f"snapshot covers cycle {snap_last} but the summary's last "
+            f"completed cycle is {summary_last} — snapshot is ahead of "
+            "the summary, refusing to trust either")
+    for rel in _required_state_files(snap_last):
+        if rel not in state:
+            problems.append(f"missing {rel}")
+    for i in range(snap_last + 1):
+        if not any(rel.startswith(f"data/seeds/feedback_cycle_{i:04d}")
+                   for rel in state):
+            problems.append(f"missing feedback seed file(s) for cycle {i}")
+    # The snapshot's own ouro_state names the exact seed file(s) each
+    # cycle produced; every one of them must be in the snapshot. Paths
+    # are normalised to data/seeds/<basename>: a snapshot produced
+    # under a different seed_docs_dir (e.g. an absolute /content/...
+    # path from a Colab run) names the same files.
+    for cyc in snap_state.get("cycles", []):
+        try:
+            if int(cyc.get("cycle", 0)) > snap_last:
+                continue
+        except (ValueError, TypeError):
+            continue
+        named = cyc.get("seed_files") or ([cyc["seed_file"]]
+                                          if cyc.get("seed_file") else [])
+        for rel in named:
+            norm = f"data/seeds/{Path(rel).name}"
+            if rel not in state and norm not in state:
+                problems.append(f"missing {rel} (named in ouro_state)")
+    return snap_last, problems
+
+
+def _seed_matches(value) -> bool:
+    try:
+        return value is not None and int(value) == RNG_SEED
+    except (ValueError, TypeError):
+        return False
+
+
+def _with_loose_frozen(state: dict[str, bytes]) -> dict[str, bytes]:
+    """The watch's per-cycle Drive sync also drops a loose copy of the
+    frozen groups directly in OUT; accept it as a fallback for that
+    one file if the snapshot itself lacks it."""
+    frozen_rel = "data/corpus/frozen_eval_groups.json"
+    if frozen_rel not in state and (OUT / "frozen_eval_groups.json").exists():
+        state = dict(state)
+        state[frozen_rel] = (OUT / "frozen_eval_groups.json").read_bytes()
+    return state
+
+
+def _validate_dir_source(path: Path,
+                         summary_last: int) -> tuple[dict, int | None,
+                                                      list[str]]:
+    meta_path = path / "snapshot_meta.json"
+    if not meta_path.exists():
+        return {}, None, [f"{path}: no snapshot_meta.json"]
+    try:
+        meta = json.loads(meta_path.read_text())
+    except json.JSONDecodeError:
+        return {}, None, [f"{path}: snapshot_meta.json unreadable"]
+    problems: list[str] = []
+    if meta.get("arm") != ARM or not _seed_matches(meta.get("rng_seed")):
+        problems.append(
+            f"{path}: snapshot_meta is arm={meta.get('arm')} "
+            f"seed={meta.get('rng_seed')}, expected arm={ARM} "
+            f"seed={RNG_SEED}")
+    state = _with_loose_frozen(_read_state_dir(path))
+    snap_last, probs = _state_problems(state, summary_last)
+    problems.extend(f"{path}: {p}" for p in probs)
+    if snap_last is not None and \
+            meta.get("last_completed_cycle") != snap_last:
+        problems.append(
+            f"{path}: snapshot_meta last_completed_cycle="
+            f"{meta.get('last_completed_cycle')} but ouro_state says "
+            f"{snap_last}")
+    hashes = meta.get("sha256")
+    if hashes:
+        for rel, want in hashes.items():
+            if rel not in state:
+                problems.append(f"{path}: {rel} listed in snapshot_meta "
+                                "hashes but absent")
+            elif _sha256(state[rel]) != want:
+                problems.append(f"{path}: sha256 mismatch for {rel} — "
+                                "file is truncated or corrupt")
+    else:
+        # Legacy metas (pre-hash snapshots) list files without hashes;
+        # existence is all that can be checked for them.
+        for rel in meta.get("files", []):
+            if rel not in state:
+                problems.append(f"{path}: {rel} listed in snapshot_meta "
+                                "but absent")
+    return state, snap_last, problems
+
+
+def _zip_run_params(z: zipfile.ZipFile) -> dict | None:
+    for name in z.namelist():
+        if name == "run/r1_params.json" or \
+                name.endswith("/run/r1_params.json"):
+            try:
+                return json.loads(z.read(name))
+            except (json.JSONDecodeError, KeyError):
+                return None
     return None
 
 
-def _read_state(source: tuple[str, Path]) -> dict[str, bytes]:
-    kind, path = source
-    return _read_state_dir(path) if kind == "dir" else _read_state_zip(path)
+def _validate_zip_source(path: Path,
+                         summary_last: int) -> tuple[dict, int | None,
+                                                      list[str]]:
+    try:
+        with zipfile.ZipFile(path) as z:
+            params = _zip_run_params(z)
+    except zipfile.BadZipFile:
+        return {}, None, [f"{path}: not a readable zip (truncated?)"]
+    problems: list[str] = []
+    if params is None:
+        problems.append(f"{path}: no readable run/r1_params.json inside "
+                        "— cannot verify which trajectory this is")
+    elif params.get("arm") != ARM or \
+            not _seed_matches(params.get("rng_seed")):
+        problems.append(
+            f"{path}: zip params are arm={params.get('arm')} "
+            f"seed={params.get('rng_seed')}, expected arm={ARM} "
+            f"seed={RNG_SEED}")
+    state = _with_loose_frozen(_read_state_zip(path))
+    snap_last, probs = _state_problems(state, summary_last)
+    problems.extend(f"{path}: {p}" for p in probs)
+    return state, snap_last, problems
+
+
+def _find_valid_source(summary_last: int) -> tuple[dict, int, Path,
+                                                   list[str]] | None:
+    """Pick the best VALIDATED state source in OUT.
+
+    Candidates: OUT/state/, OUT/state.prev/ (the previous snapshot,
+    kept by the atomic swap in snapshot()), then every checkpoint zip.
+    A candidate must prove it belongs to this arm+seed and be
+    internally consistent; the winner is the one covering the most
+    cycles (ties prefer the live state dir). Returns (state, snap_last,
+    source_path, rejections) or None plus all rejection reasons.
+    """
+    candidates: list[tuple[str, Path]] = []
+    for name in ("state", "state.prev"):
+        d = OUT / name
+        if (d / "data/ouro_state.json").exists() or \
+                (d / "snapshot_meta.json").exists():
+            candidates.append(("dir", d))
+    for zp in sorted(OUT.glob("*checkpoint*.zip")):
+        candidates.append(("zip", zp))
+    valid: list[tuple[int, int, dict, Path]] = []
+    rejections: list[str] = []
+    for order, (kind, path) in enumerate(candidates):
+        if kind == "dir":
+            state, snap_last, problems = _validate_dir_source(
+                path, summary_last)
+        else:
+            state, snap_last, problems = _validate_zip_source(
+                path, summary_last)
+        if problems:
+            rejections.extend(problems)
+        elif snap_last is not None:
+            valid.append((snap_last, -order, state, path))
+    if not valid:
+        return None
+    snap_last, _neg_order, state, path = max(valid, key=lambda v: (v[0], v[1]))
+    # Drop per-cycle files from cycles beyond the snapshot's own last
+    # cycle — they belong to an interrupted later cycle.
+    state = {rel: blob for rel, blob in state.items()
+             if (_cycle_index(rel) is None or _cycle_index(rel) <= snap_last)}
+    return state, snap_last, path, rejections
 
 
 def _has_cycle_feedback(root: Path, cycle: int) -> bool:
@@ -456,12 +699,47 @@ def _has_cycle_feedback(root: Path, cycle: int) -> bool:
 
 
 def _clone_state_complete(last: int) -> bool:
+    """Existence-level check, used by the init() guard: right cycle
+    count, required files present, feedback for every cycle, AND the
+    clone's owner marker naming this trajectory. (resume() applies the
+    stronger byte-for-byte check against a validated snapshot.)"""
     if _clone_cycle_count() != last + 1:
+        return False
+    if not _clone_owner_ok():
         return False
     if not all((REPO / rel).exists()
                for rel in _required_state_files(last)):
         return False
     return all(_has_cycle_feedback(REPO, i) for i in range(last + 1))
+
+
+def _clone_matches_state(state: dict[str, bytes], last: int) -> bool:
+    """Byte-for-byte check: every file in the snapshot is present in
+    the clone with identical content, and the cycle count agrees.
+    This is what 'already-restored' requires — a matching cycle count
+    alone proves nothing about WHICH trajectory the clone holds."""
+    if _clone_cycle_count() != last + 1:
+        return False
+    for rel, blob in state.items():
+        p = REPO / rel
+        if not p.exists() or p.read_bytes() != blob:
+            return False
+    return True
+
+
+def _cleanup_clone_state(state: dict[str, bytes]) -> None:
+    """Delete EVERY per-cycle feedback/corpus file in the clone that
+    is not part of the state being restored — any cycle index, not
+    just beyond the last completed one. Files from a foreign or
+    interrupted run left alongside the restored ones would otherwise
+    be globbed into the next cycle's training/feedback inputs."""
+    for sub, pat in (("data/seeds", "feedback_cycle_*.txt"),
+                     ("data/corpus", "corpus_cycle_*.jsonl")):
+        d = REPO / sub
+        if d.exists():
+            for p in d.glob(pat):
+                if str(p.relative_to(REPO)) not in state:
+                    p.unlink()
 
 
 def snapshot() -> None:
@@ -470,6 +748,16 @@ def snapshot() -> None:
     Run after stage 3. Unlike the notebook checkpoint zip (end-of-run in
     practice), this lands in OUT every cycle, so any per-cycle sync of OUT
     — Drive folder, pod disk, scp — carries enough state to resume.
+
+    The snapshot is ATOMIC and REFUSES inconsistent state: if the
+    clone's cycle_count is not exactly last_completed + 1, the state is
+    mid-cycle or divergent, and overwriting the last good snapshot with
+    it would destroy the only resumable copy — so snapshot exits
+    non-zero and leaves OUT/state/ untouched. Otherwise the new
+    snapshot is built in OUT/state.tmp/ (snapshot_meta.json, carrying a
+    sha256 per file, written last) and swapped into place, with the
+    previous snapshot kept as OUT/state.prev/ until the swap completes;
+    resume() accepts state.prev/ as a fallback source.
     """
     summary = load_summary()
     completed = _completed_cycles(summary)
@@ -479,18 +767,14 @@ def snapshot() -> None:
     last = completed[-1]
     cc = _clone_cycle_count()
     if cc != last + 1:
-        log.warning(
-            "snapshot: clone cycle_count=%d, last completed cycle=%d — "
-            "state may be mid-cycle; snapshotting anyway", cc, last)
-    dst = OUT / "state"
-    copied: list[str] = []
-    for rel in _expected_state_files(last):
-        src = REPO / rel
-        if src.exists():
-            d = dst / rel
-            d.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy(src, d)
-            copied.append(rel)
+        raise SystemExit(
+            f"snapshot: clone cycle_count={cc} but the last completed "
+            f"cycle is {last} (expected cycle_count {last + 1}) — the "
+            "clone state is mid-cycle or divergent; refusing to "
+            "overwrite the last good snapshot in OUT/state/")
+    _write_owner()
+    rels: list[str] = [rel for rel in _expected_state_files(last)
+                       if (REPO / rel).exists()]
     # Feedback files: names vary by injection mode, so glob them; keep
     # only cycles <= last (a partial file from an interrupted later cycle
     # must not leak into the snapshot).
@@ -500,32 +784,52 @@ def snapshot() -> None:
             rel = f"data/seeds/{p.name}"
             idx = _cycle_index(rel)
             if idx is not None and idx <= last:
-                d = dst / rel
-                d.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy(p, d)
-                copied.append(rel)
-    # Prune state files from cycles beyond `last` (stale leftovers if OUT
-    # was reused after a longer snapshot).
-    for sub, pat in (("data/seeds", "feedback_cycle_*.txt"),
-                     ("data/corpus", "corpus_cycle_*.jsonl")):
-        d = dst / sub
-        if d.exists():
-            for p in d.glob(pat):
-                idx = _cycle_index(str(p.relative_to(dst)))
-                if idx is not None and idx > last:
-                    p.unlink()
+                rels.append(rel)
+    tmp = OUT / "state.tmp"
+    prev = OUT / "state.prev"
+    dst = OUT / "state"
+    if tmp.exists():
+        shutil.rmtree(tmp)
+    copied: list[str] = []
+    hashes: dict[str, str] = {}
+    for rel in rels:
+        blob = (REPO / rel).read_bytes()
+        d = tmp / rel
+        d.parent.mkdir(parents=True, exist_ok=True)
+        d.write_bytes(blob)
+        copied.append(rel)
+        hashes[rel] = _sha256(blob)
     meta = {
         "arm": ARM, "rng_seed": RNG_SEED, "last_completed_cycle": last,
-        "clone_cycle_count": cc, "files": copied, "written_at": time.time(),
+        "clone_cycle_count": cc, "files": copied, "sha256": hashes,
+        "written_at": time.time(),
     }
-    (dst / "snapshot_meta.json").write_text(json.dumps(meta, indent=2))
+    (tmp / "snapshot_meta.json").write_text(json.dumps(meta, indent=2))
+    if prev.exists():
+        shutil.rmtree(prev)
+    if dst.exists():
+        os.rename(dst, prev)
+    os.rename(tmp, dst)
+    if prev.exists():
+        shutil.rmtree(prev)
     log.info("SNAPSHOT DONE — %d state files for cycles 0..%d in %s",
              len(copied), last, dst)
 
 
 def resume(dry_run: bool = False) -> dict:
     """Restore trajectory state into the clone so the next stage 1 starts
-    at cycle (last completed + 1) instead of restarting from cycle 0."""
+    at cycle (last completed + 1) instead of restarting from cycle 0.
+
+    The state source must PROVE it belongs to this trajectory: a dir
+    snapshot's snapshot_meta.json and a zip's inner run/r1_params.json
+    must name this arm+seed, the snapshot must be internally consistent
+    (for dir snapshots, every file's sha256 must match its meta), and
+    its cycle coverage decides where the run resumes from. If the
+    summary claims cycles beyond the snapshot (stage 3 marked a cycle
+    complete, then the box died before snapshot ran), those records are
+    moved to the summary's `abandoned_cycles` list — never deleted —
+    and the run resumes from the snapshot.
+    """
     summary = load_summary()
     completed = _completed_cycles(summary)
     report: dict = {"arm": ARM, "rng_seed": RNG_SEED,
@@ -536,98 +840,102 @@ def resume(dry_run: bool = False) -> dict:
         log.info("resume: no completed cycles in summary — nothing to do")
         print(json.dumps(report, indent=2))
         return report
-    last = completed[-1]
-    if summary.get("arm") not in (None, ARM) or \
-            int(summary.get("rng_seed", RNG_SEED)) != RNG_SEED:
+    # Strict identity check: both keys must be present and match. (The
+    # driver always writes them, so an absent key means a foreign or
+    # hand-edited summary — not something to guess around.)
+    sum_seed = summary.get("rng_seed")
+    try:
+        sum_seed_ok = sum_seed is not None and int(sum_seed) == RNG_SEED
+    except (ValueError, TypeError):
+        sum_seed_ok = False
+    if summary.get("arm") != ARM or not sum_seed_ok:
         raise SystemExit(
             f"resume: summary is arm={summary.get('arm')} "
             f"seed={summary.get('rng_seed')} but r1_params.json says "
             f"arm={ARM} seed={RNG_SEED} — refusing to mix trajectories")
-    if _clone_state_complete(last):
-        report["status"] = "already-restored"
-        log.info("resume: clone already holds state through cycle %d", last)
-        print(json.dumps(report, indent=2))
-        return report
-    source = _find_state_source()
-    if source is None:
+    summary_last = completed[-1]
+    found = _find_valid_source(summary_last)
+    if found is None:
+        # No validated snapshot anywhere. Last resort: the clone itself
+        # already holds this trajectory's state (e.g. a notebook run
+        # whose OUT was never snapshotted by this driver). Adopt it —
+        # write the owner marker so future checks can verify it — but
+        # only on the full existence check against the summary's arm
+        # and seed, which were verified above.
+        if _clone_cycle_count() == summary_last + 1 and \
+                all((REPO / rel).exists()
+                    for rel in _required_state_files(summary_last)) and \
+                all(_has_cycle_feedback(REPO, i)
+                    for i in range(summary_last + 1)):
+            if not dry_run:
+                _write_owner()
+            report["status"] = "already-restored"
+            report["next_cycle"] = summary_last + 1
+            report["note"] = ("no snapshot source in OUT; clone state "
+                              "adopted on existence checks + owner "
+                              "marker written")
+            log.warning("resume: no snapshot source in OUT, but the "
+                        "clone holds state through cycle %d — adopting "
+                        "it", summary_last)
+            print(json.dumps(report, indent=2))
+            return report
         raise SystemExit(
             f"resume: summary holds {len(completed)} completed cycle(s) "
-            f"(0..{last}) but OUT has no trajectory state snapshot "
-            f"(looked for {OUT}/state/ and {OUT}/*checkpoint*.zip). "
-            "Missing state: " + ", ".join(_required_state_files(last)) +
-            ", plus the per-cycle feedback seed files under data/seeds/ "
-            "— the loose OUT files (summary/params/logs) never contained "
-            "the clone's data/ state, so this trajectory cannot be resumed "
-            "faithfully; it would have to restart from cycle 0.")
-    state = _read_state(source)
-    # Drop per-cycle files from cycles beyond `last` — they belong to an
-    # interrupted later cycle and must not leak into the restored state.
-    state = {rel: blob for rel, blob in state.items()
-             if (_cycle_index(rel) is None or _cycle_index(rel) <= last)}
-    # The watch's per-cycle Drive sync also drops a loose copy of the
-    # frozen groups directly in OUT; accept it as a fallback for that file.
-    frozen_rel = "data/corpus/frozen_eval_groups.json"
-    if frozen_rel not in state and (OUT / "frozen_eval_groups.json").exists():
-        state[frozen_rel] = (OUT / "frozen_eval_groups.json").read_bytes()
-    problems: list[str] = []
-    raw = state.get("data/ouro_state.json")
-    snap_state: dict = {}
-    if raw is None:
-        problems.append("data/ouro_state.json not in snapshot")
-    else:
-        try:
-            snap_state = json.loads(raw)
-            snap_cc = int(snap_state.get("cycle_count", -1))
-        except (json.JSONDecodeError, ValueError, TypeError):
-            snap_cc = -1
-        if snap_cc != last + 1:
-            problems.append(
-                f"snapshot ouro_state cycle_count={snap_cc}, expected "
-                f"{last + 1} (last completed cycle {last} + 1)")
-    for rel in _required_state_files(last):
-        if rel not in state:
-            problems.append(f"missing {rel}")
-    for i in range(last + 1):
-        if not any(rel.startswith(f"data/seeds/feedback_cycle_{i:04d}")
-                   for rel in state):
-            problems.append(f"missing feedback seed file(s) for cycle {i}")
-    # The snapshot's own ouro_state names the exact seed file(s) each
-    # cycle produced; every one of them must be in the snapshot.
-    for cyc in snap_state.get("cycles", []):
-        if int(cyc.get("cycle", 0)) > last:
-            continue
-        named = cyc.get("seed_files") or ([cyc["seed_file"]]
-                                          if cyc.get("seed_file") else [])
-        for rel in named:
-            if rel not in state:
-                problems.append(f"missing {rel} (named in ouro_state)")
-    if problems:
-        raise SystemExit(
-            f"resume: state source {source[1]} is incomplete for resuming "
-            f"after cycle {last}: " + "; ".join(problems))
-    report["source"] = str(source[1])
+            f"(0..{summary_last}) but no state source in OUT validated "
+            f"for arm={ARM} seed={RNG_SEED} (looked at {OUT}/state/, "
+            f"{OUT}/state.prev/, {OUT}/*checkpoint*.zip) and the clone "
+            "does not hold the state either. The loose OUT files "
+            "(summary/params/logs) never contained the clone's data/ "
+            "state, so this trajectory cannot be resumed faithfully; "
+            "it would have to restart from cycle 0.")
+    state, last, source_path, _rejections = found
+    report["source"] = str(source_path)
     report["files"] = sorted(state)
+    # Roll the summary back to the snapshot if it claims more: stage 3
+    # writes `complete: true` BEFORE the runner snapshots, so a death
+    # in that window leaves the summary one cycle ahead of the newest
+    # state. The extra records are preserved in `abandoned_cycles`.
+    abandoned = [r for r in summary.get("cycles", [])
+                 if int(r["cycle"]) > last and r.get("complete")]
+    if abandoned:
+        report["abandoned_cycles"] = [int(r["cycle"]) for r in abandoned]
+        if not dry_run:
+            summary.setdefault("abandoned_cycles", []).extend(abandoned)
+            summary["cycles"] = [
+                r for r in summary["cycles"]
+                if not (int(r["cycle"]) > last and r.get("complete"))]
+            save_summary(summary)
+            log.warning("resume: summary claimed cycle(s) %s complete "
+                        "beyond the snapshot's cycle %d — moved to "
+                        "abandoned_cycles; resuming from the snapshot",
+                        report["abandoned_cycles"], last)
+    if _clone_matches_state(state, last):
+        # Already restored — byte-for-byte identical to the validated
+        # snapshot. Still run the foreign-file cleanup: partial files
+        # from an interrupted later cycle must not survive just
+        # because the restore itself is a no-op.
+        if not dry_run:
+            _cleanup_clone_state(state)
+            _write_owner()
+        report["status"] = "already-restored"
+        report["next_cycle"] = last + 1
+        log.info("resume: clone already holds the snapshot state "
+                 "through cycle %d", last)
+        print(json.dumps(report, indent=2))
+        return report
     if dry_run:
         report["status"] = "would-resume"
         report["next_cycle"] = last + 1
         log.info("resume (dry-run): would restore %d files from %s; "
-                 "next cycle = %d", len(state), source[1], last + 1)
+                 "next cycle = %d", len(state), source_path, last + 1)
         print(json.dumps(report, indent=2))
         return report
+    _cleanup_clone_state(state)
     for rel, blob in state.items():
         d = REPO / rel
         d.parent.mkdir(parents=True, exist_ok=True)
         d.write_bytes(blob)
-    # Defensive cleanup: drop partial-cycle leftovers beyond `last` so a
-    # re-run of the interrupted cycle starts from exactly the snapshot.
-    for sub, pat in (("data/seeds", "feedback_cycle_*.txt"),
-                     ("data/corpus", "corpus_cycle_*.jsonl")):
-        d = REPO / sub
-        if d.exists():
-            for p in d.glob(pat):
-                idx = _cycle_index(str(p.relative_to(REPO)))
-                if idx is not None and idx > last:
-                    p.unlink()
+    _write_owner()
     if not (OUT / "run_state.json").exists():
         human = sorted((REPO / "data/seeds").glob("seed*.txt"))
         (OUT / "run_state.json").write_text(json.dumps({
@@ -638,7 +946,7 @@ def resume(dry_run: bool = False) -> dict:
     report["next_cycle"] = last + 1
     report["clone_cycle_count_after"] = _clone_cycle_count()
     log.info("RESUME DONE — restored %d files from %s; clone cycle_count=%d, "
-             "next cycle = %d", len(state), source[1],
+             "next cycle = %d", len(state), source_path,
              report["clone_cycle_count_after"], last + 1)
     print(json.dumps(report, indent=2))
     return report
