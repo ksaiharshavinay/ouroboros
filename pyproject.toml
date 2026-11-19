@@ -2,6 +2,9 @@
 requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta:__legacy__"
 
+[tool.setuptools.packages.find]
+include = ["ouro*", "swarm*", "autoresearch*"]
+
 [project]
 name = "ouroboros-ai"
 version = "0.1.0"
