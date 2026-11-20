@@ -62,7 +62,7 @@ TRAIN_STEPS = int(PARAMS["train_steps"])
 TRAIN_MODEL = PARAMS["train_model"]
 VENV_PY = PARAMS["venv_python"]
 REAL_FRACTION = float(PARAMS.get("real_fraction", 0))
-GATE_ENABLED = ARM != "B4"
+GATE_ENABLED = ARM not in ("B4", "B3")  # B3: gate off, like B4 (R3 §4)
 # R3 Tier 2 gate configuration (optional; absent = the historical
 # gate, exactly). r1_run.py records only the overrides the operator
 # actually passed under params["gate"]: {"weights": {signal: w},
@@ -244,7 +244,12 @@ def stage1() -> None:
             p.name for p in (REPO / "data/seeds").glob("*.txt")),
     })
     t0 = time.time()
-    sim_result = pipeline.run_swarm()
+    if ARM == "B3":
+        # R3 §4: no simulation — the current checkpoint generates the
+        # corpus directly from the human seed documents. No Ollama.
+        sim_result = pipeline.run_direct_corpus()
+    else:
+        sim_result = pipeline.run_swarm()
     rec.update({
         "stage1_seconds": round(time.time() - t0, 1),
         "num_turns": sim_result.get("num_turns"),
@@ -416,10 +421,22 @@ def stage3() -> None:
     sim_result = json.loads((OUT / f"sim_result_cycle_{cycle:02d}.json").read_text())
     t0 = time.time()
     context = pipeline._load_corpus_context(sim_result)
-    # Peek at the first candidate's backend/sha via a metadata prediction,
-    # then run the pipeline's own gated feedback path (B5) which samples
-    # its own candidates. The peek is provenance reporting only.
-    seed_path = pipeline._infer_and_feed_back(PROMPT, context, sim_result)
+    if ARM == "B3":
+        # R3 §4: sample and log the cycle's candidates (audit parity
+        # with the gated arms) but write NO feedback seeds — in B3
+        # the next cycle's direct corpus generation is the feedback.
+        candidates = pipeline.sample_prediction_candidates(
+            PROMPT, context, sim_result)
+        (OUT / f"b3_candidates_cycle_{cycle:02d}.json").write_text(
+            json.dumps(candidates, indent=2, default=str))
+        pipeline.feedback.record_cycle_without_feedback(
+            sim_result, candidates)
+        seed_path = Path()
+    else:
+        # Peek at the first candidate's backend/sha via a metadata prediction,
+        # then run the pipeline's own gated feedback path (B5) which samples
+        # its own candidates. The peek is provenance reporting only.
+        seed_path = pipeline._infer_and_feed_back(PROMPT, context, sim_result)
     rec["stage3_seconds"] = round(time.time() - t0, 1)
     state = json.loads((REPO / "data/ouro_state.json").read_text())
     cycle_meta = state["cycles"][-1] if state.get("cycles") else {}
@@ -638,10 +655,14 @@ def _state_problems(state: dict[str, bytes],
     for rel in _required_state_files(snap_last):
         if rel not in state:
             problems.append(f"missing {rel}")
-    for i in range(snap_last + 1):
-        if not any(rel.startswith(f"data/seeds/feedback_cycle_{i:04d}")
-                   for rel in state):
-            problems.append(f"missing feedback seed file(s) for cycle {i}")
+    # B3 writes no feedback seeds by construction (R3 §4) — its
+    # recursion channel is the next cycle's directly generated corpus.
+    if ARM != "B3":
+        for i in range(snap_last + 1):
+            if not any(rel.startswith(f"data/seeds/feedback_cycle_{i:04d}")
+                       for rel in state):
+                problems.append(
+                    f"missing feedback seed file(s) for cycle {i}")
     # The snapshot's own ouro_state names the exact seed file(s) each
     # cycle produced; every one of them must be in the snapshot. Paths
     # are normalised to data/seeds/<basename>: a snapshot produced
@@ -820,6 +841,8 @@ def _clone_state_complete(last: int) -> bool:
     if not all((REPO / rel).exists()
                for rel in _required_state_files(last)):
         return False
+    if ARM == "B3":
+        return True  # B3 writes no feedback seeds by construction.
     return all(_has_cycle_feedback(REPO, i) for i in range(last + 1))
 
 

@@ -22,6 +22,11 @@ Behaviour:
   * Run Spec R2: --arm B6 (or B5) with --real-fraction F anchors the
     train split with human-seed examples at F of training tokens;
     B6 with a 0 fraction is refused (that would just be B5).
+  * Run Spec R3: --arm B3 is direct self-training — no swarm, no
+    Ollama at all; the current checkpoint generates each cycle's
+    corpus from the seed documents and stage 3 logs candidates
+    without writing feedback seeds. Gate overrides (--gate-weight-*,
+    --no-gate-vetoes) configure B5-based Tier 2 ablations via params.
 
 Notes:
   * --no-resume only skips the explicit resume step. The driver's
@@ -58,7 +63,7 @@ DRIVER = REPO / "scripts" / "r1_driver.py"
 
 def parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--arm", choices=["B4", "B5", "B6"], required=True)
+    ap.add_argument("--arm", choices=["B3", "B4", "B5", "B6"], required=True)
     ap.add_argument("--seed", type=int, required=True,
                     help="rng seed / replicate number (rep N uses seed N)")
     ap.add_argument("--real-fraction", type=float, default=0,
@@ -387,11 +392,18 @@ def main() -> None:
             raise SystemExit(
                 "gate weights must not all be zero — the gate would "
                 "score every candidate 0 and reject everything")
-        if args.arm == "B4":
+        if args.arm in ("B4", "B3"):
             raise SystemExit(
-                "gate overrides are meaningless for --arm B4: its gate "
-                "is disabled (uniform feedback). Gate ablations are "
+                f"gate overrides are meaningless for --arm {args.arm}: "
+                "its gate is disabled. Gate ablations are "
                 "B5-based (R3 Tier 2).")
+    if args.arm == "B3" and args.real_fraction > 0:
+        raise SystemExit(
+            "--arm B3 has no anchor variant: the anchoring sweep (R2) "
+            "varies the real fraction against the swarm arms, and B3's "
+            "corpus is generated from the seed documents directly — "
+            "a real fraction would double-count them. B3 runs at "
+            "real_fraction 0 (R3 §4).")
     out = args.out.resolve()
     out.mkdir(parents=True, exist_ok=True)
     os.environ["OURO_R1_OUT"] = str(out)
@@ -477,7 +489,9 @@ def main() -> None:
             f"another r1_run holds {lock_path} — refusing to share a "
             "clone between two runners")
 
-    ensure_ollama(args, out, host)
+    if args.arm != "B3":
+        ensure_ollama(args, out, host)
+    # B3 never touches Ollama: no swarm in its loop at all (R3 §4).
     # Resume BEFORE init: init's guard would resume anyway, but doing
     # it explicitly first keeps init a pure no-op confirmation.
     if args.resume:
@@ -497,11 +511,13 @@ def main() -> None:
                 f"to run is {cycle} — the clone and the summary "
                 "disagree; aborting before stage 1")
         run_driver(args, out, "stage1", f"stage1_cycle_{cycle:04d}.log")
-        # Unload the swarm model so training gets the GPU (notebook
-        # cell: `ollama stop <model>` before stage 2) — and verify.
-        unload_swarm_model(args)
+        if args.arm != "B3":
+            # Unload the swarm model so training gets the GPU (notebook
+            # cell: `ollama stop <model>` before stage 2) — and verify.
+            unload_swarm_model(args)
         run_driver(args, out, "stage2", f"stage2_cycle_{cycle:04d}.log")
-        ensure_ollama(args, out, host)
+        if args.arm != "B3":
+            ensure_ollama(args, out, host)
         run_driver(args, out, "stage3", f"stage3_cycle_{cycle:04d}.log")
         done = completed_cycles(out)
         if cycle not in done:

@@ -284,6 +284,58 @@ class OuroFeedbackModule:
         )
         return seed_paths
 
+    def record_cycle_without_feedback(
+        self,
+        sim_result: dict[str, Any],
+        candidates: list[dict[str, Any]],
+    ) -> list[Path]:
+        """
+        B3 (Run Spec R3 §4) cycle bookkeeping: record a completed
+        cycle WITHOUT writing any feedback seeds.
+
+        In B3 there is no swarm and nothing is injected as a seed —
+        the next cycle's directly generated corpus IS the feedback.
+        The candidates sampled this cycle are still recorded in the
+        cycle metadata (audit parity with the gated arms: the §6
+        audit and any later analysis can see what the checkpoint
+        produced when asked for predictions), but selected_count is 0
+        and no seed files are written. cycle_count advances exactly
+        as in run_feedback_gated so snapshot/resume treat B3 as a
+        first-class arm.
+
+        Returns:
+            Always [] (no seed files written, by construction).
+        """
+        cycle = self.cycle_count
+        cycle_meta = {
+            "cycle": cycle,
+            "seed_files": [],
+            "num_turns": sim_result.get("num_turns", 0),
+            "num_agents": sim_result.get("num_agents", 0),
+            "injection_mode": "direct_no_feedback",
+            "total_candidates": len(candidates),
+            "selected_count": 0,
+            "candidates": [
+                {
+                    "text": c.get("text", ""),
+                    "prompt": c.get("prompt", ""),
+                    "backend": c.get("backend"),
+                    "checkpoint_sha256": c.get("checkpoint_sha256"),
+                    "corpus_path": c.get("corpus_path"),
+                    "cycle": c.get("cycle", cycle),
+                }
+                for c in candidates
+            ],
+        }
+        self._state["cycles"].append(cycle_meta)
+        self._state["cycle_count"] = cycle + 1
+        self._save_state()
+        logger.info(
+            "[ouro] B3 direct cycle %d recorded: %d candidates logged, "
+            "no feedback seeds written", cycle, len(candidates),
+        )
+        return []
+
     def _append_gate_log(self, cycle: int, decisions: list[dict[str, Any]]) -> None:
         """Append per-candidate gate decisions to the JSONL audit log."""
         from datetime import datetime, timezone

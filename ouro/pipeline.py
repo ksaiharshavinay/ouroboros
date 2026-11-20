@@ -61,6 +61,69 @@ class OuroPipeline:
         return seeds
 
     # ------------------------------------------------------------------
+    # Stage 1 (B3) — Direct generation, no simulation (Run Spec R3 §4)
+    # ------------------------------------------------------------------
+
+    def run_direct_corpus(self) -> dict[str, Any]:
+        """
+        B3's stage 1: the current checkpoint generates the cycle's
+        corpus directly from the human seed documents — no swarm, no
+        Ollama. Returns a sim_result-shaped dict so the driver's
+        stage bookkeeping (metrics, summary) is identical to a
+        simulation cycle.
+        """
+        from .direct import (DirectCheckpointGenerator, build_direct_turns,
+                             write_direct_corpus)
+
+        cycle = self.feedback.cycle_count
+        # The human seed documents only: the seeds directory also
+        # accumulates feedback_cycle_*.txt from other arms' runs, and
+        # B3's conditioning set is exactly the five human documents.
+        seed_paths = [p for p in self._load_seeds()
+                      if not p.name.startswith("feedback_cycle_")]
+        seed_texts = [p.read_text(encoding="utf-8") for p in seed_paths]
+        if len(seed_texts) != 5:
+            raise RuntimeError(
+                f"B3 expects the five human seed documents in "
+                f"{self.config.seed_docs_dir}, found {len(seed_texts)}")
+        generator = DirectCheckpointGenerator(self.config, pipeline=self)
+        turns = build_direct_turns(seed_texts, generator, cycle)
+        corpus_path = write_direct_corpus(
+            turns, Path(self.config.corpus_dir), cycle)
+        logger.info("[ouro] B3 direct corpus cycle %d — %d turns -> %s",
+                    cycle, len(turns), corpus_path)
+        return {
+            "corpus_path": str(corpus_path),
+            "num_turns": len(turns),
+            "num_agents": len(seed_texts),
+            "num_rounds": max(t["round"] for t in turns),
+            "cycle": cycle,
+        }
+
+    def sample_prediction_candidates(
+        self, prompt: str, context: str | None, sim_result: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        """
+        Sample this cycle's prediction candidates with provenance —
+        the same sampling _infer_and_feed_back performs for the gated
+        arms — WITHOUT feeding anything back. B3's stage 3 uses this
+        for audit parity: the candidates are logged, never injected.
+        """
+        n = max(1, int(getattr(self.config, "feedback_num_candidates", 3)))
+        candidates: list[dict[str, Any]] = []
+        for _ in range(n):
+            meta = self.infer.predict_with_metadata(prompt, context=context)
+            candidates.append({
+                "prompt": prompt,
+                "text": meta["text"],
+                "backend": meta["backend"],
+                "checkpoint_sha256": meta["checkpoint_sha256"],
+                "corpus_path": sim_result.get("corpus_path"),
+                "cycle": self.feedback.cycle_count,
+            })
+        return candidates
+
+    # ------------------------------------------------------------------
     # Stage 2 — AutoResearch training loop
     # ------------------------------------------------------------------
 
