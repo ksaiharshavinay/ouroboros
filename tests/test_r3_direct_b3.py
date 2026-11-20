@@ -69,6 +69,87 @@ def test_build_direct_turns_refuses_empty_generation():
                            cycle=0)
 
 
+def test_build_direct_turns_caps_turn_length():
+    turns = build_direct_turns(SEEDS, lambda p: "word " * 400, cycle=0)
+    assert all(len(t["content"]) <= 1000 for t in turns)
+
+
+def test_build_direct_turns_round_major_order():
+    turns = build_direct_turns(SEEDS, lambda p: "some generated text",
+                               cycle=0)
+    keys = [(t["round"], t["agent_id"]) for t in turns]
+    assert keys == sorted(keys)
+    assert turns[0]["round"] == 1 and turns[-1]["round"] == 10
+
+
+def test_generator_uses_pipeline_engine_when_adapter_present():
+    # Regression (Opus review): DirectCheckpointGenerator must go
+    # through the pipeline's own inference engine — a nonexistent
+    # helper import and a two-arg engine constructor previously made
+    # every B3 cycle die in stage 1.
+    from types import SimpleNamespace
+
+    from ouro.direct import DirectCheckpointGenerator
+
+    class FakeEngine:
+        def has_adapter_checkpoint(self):
+            return True
+
+        def predict(self, prompt):
+            return "adapter generated text"
+
+    gen = DirectCheckpointGenerator(
+        SimpleNamespace(train_base_model="unused"),
+        pipeline=SimpleNamespace(infer=FakeEngine()))
+    assert gen("any prompt") == "adapter generated text"
+
+
+def _b3_pipeline(tmp_path, cycle_count: int):
+    from ouro.config import OuroConfig
+    from ouro.pipeline import OuroPipeline
+
+    seeds_dir = tmp_path / "seeds"
+    seeds_dir.mkdir()
+    for i in range(5):
+        (seeds_dir / f"seed{i + 1}.txt").write_text(
+            f"Seed {i + 1} title\n\nOpening prose of seed {i + 1}.")
+    cfg = OuroConfig()
+    cfg.seed_docs_dir = seeds_dir
+    cfg.corpus_dir = tmp_path / "corpus"
+    cfg.model_dir = tmp_path / "model"
+    cfg.feedback_state_path = tmp_path / "ouro_state.json"
+    cfg.feedback_state_path.write_text(json.dumps(
+        {"cycle_count": cycle_count, "cycles": []}))
+    return OuroPipeline(cfg)
+
+
+def test_run_direct_corpus_refuses_base_model_after_cycle0(tmp_path):
+    # A resumed B3 without its adapter must fail loudly, never
+    # silently generate a base-model corpus (Opus review finding).
+    pipeline = _b3_pipeline(tmp_path, cycle_count=1)
+    with pytest.raises(RuntimeError, match="refusing to generate"):
+        pipeline.run_direct_corpus()
+
+
+def test_run_direct_corpus_cycle0(tmp_path, monkeypatch):
+    import ouro.direct as direct_mod
+
+    class FakeGenerator:
+        def __init__(self, config, pipeline=None):
+            pass
+
+        def __call__(self, prompt):
+            return "generated turn text"
+
+    monkeypatch.setattr(direct_mod, "DirectCheckpointGenerator",
+                        FakeGenerator)
+    pipeline = _b3_pipeline(tmp_path, cycle_count=0)
+    result = pipeline.run_direct_corpus()
+    assert result["num_turns"] == 60
+    lines = Path(result["corpus_path"]).read_text().splitlines()
+    assert len(lines) == 60
+
+
 def test_write_direct_corpus_format(tmp_path):
     turns = build_direct_turns(SEEDS, lambda p: "some generated text",
                                cycle=2)

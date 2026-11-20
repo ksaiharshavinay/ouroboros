@@ -125,6 +125,7 @@ def make_pipeline() -> OuroPipeline:
         num_agents=NUM_AGENTS,
         simulation_rounds=ROUNDS,
         train_python=VENV_PY,
+        train_base_model=TRAIN_MODEL,
         feedback_gate_enabled=GATE_ENABLED,
         **gate_kwargs,
     )
@@ -478,6 +479,10 @@ def stage3() -> None:
 #                                      from the base model, so the LoRA
 #                                      adapter weights are per-cycle outputs,
 #                                      NOT trajectory state, and are excluded.
+#                                      EXCEPTION (B3): the adapter generates
+#                                      the next cycle's corpus, so for B3
+#                                      the whole checkpoint dir IS state
+#                                      and is snapshotted/restored.
 # Also excluded: data/kuzu_graph (a derived cache, rebuilt from the seed
 # documents on every stage 1) and train/eval.jsonl (regenerated
 # deterministically by prepare.py: fixed split seed + the frozen groups).
@@ -557,6 +562,16 @@ def _read_state_dir(root: Path) -> dict[str, bytes]:
         if d.exists():
             for p in d.glob(pat):
                 state[str(p.relative_to(root))] = p.read_bytes()
+    if ARM == "B3":
+        # B3 only: the adapter weights are trajectory state (they
+        # generate the next cycle's corpus), so they are read here
+        # too. For every other arm training restarts from the base
+        # model each cycle and the adapter is a per-cycle output.
+        d = root / "data/model/checkpoint"
+        if d.exists():
+            for p in sorted(d.iterdir()):
+                if p.is_file():
+                    state[str(p.relative_to(root))] = p.read_bytes()
     return state
 
 
@@ -565,9 +580,14 @@ def _is_state_rel(rel: str) -> bool:
 
     Anything else in a checkpoint zip (LoRA adapter weights, the kuzu
     graph, train/eval.jsonl, ...) is a per-cycle output or a derived
-    cache, NOT trajectory state, and is never restored.
+    cache, NOT trajectory state, and is never restored. Exception:
+    for B3 the adapter weights ARE trajectory state — they generate
+    the next cycle's corpus — so the checkpoint dir is allowlisted
+    when ARM is B3.
     """
     if rel in FIXED_STATE_FILES:
+        return True
+    if ARM == "B3" and rel.startswith("data/model/checkpoint/"):
         return True
     return any(rel.startswith(f"{sub}/{prefix}")
                for sub, prefix in _CYCLE_PATTERNS)
@@ -918,6 +938,17 @@ def snapshot() -> None:
             idx = _cycle_index(rel)
             if idx is not None and idx <= last:
                 rels.append(rel)
+    if ARM == "B3":
+        # B3 only: snapshot the adapter weights — they generate the
+        # next cycle's corpus, so a resume without them would
+        # silently fall back to the base model (run_direct_corpus
+        # refuses that case, but the snapshot is what makes a
+        # cross-pod B3 resume possible at all).
+        ckpt_dir = REPO / "data/model/checkpoint"
+        if ckpt_dir.exists():
+            for p in sorted(ckpt_dir.iterdir()):
+                if p.is_file():
+                    rels.append(f"data/model/checkpoint/{p.name}")
     tmp = OUT / "state.tmp"
     prev = OUT / "state.prev"
     dst = OUT / "state"

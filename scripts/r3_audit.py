@@ -248,8 +248,16 @@ def _gate_config(state: RunState, corpus_view: Path, seed_view: Path):
         cfg.gate_vetoes_enabled = False
     base = state.params.get("train_model")
     if base:
-        cfg.base_model_name = base
+        cfg.train_base_model = base
     return cfg
+
+
+# Candidates per gate evaluation, matching the live stage: the
+# driver's feedback stage samples feedback_num_candidates (3) per
+# prompt, so the consistency signal's peer set is 2, not 17. Scoring
+# all 18 pool candidates in one evaluate() call would compute a
+# different, lower-variance consistency statistic than the live one.
+LIVE_GROUP_SIZE = 3
 
 
 def evaluate_pool(state: RunState, candidates: list[dict],
@@ -269,11 +277,16 @@ def evaluate_pool(state: RunState, candidates: list[dict],
             c = dict(cand)
             c.setdefault("prompt", PROMPT)
             c.setdefault("cycle", cycle)
-            c.setdefault("corpus_path",
-                         str(state.corpora.get(cycle, "")))
+            # Always the LOCAL corpus file for this cycle: a candidate
+            # sampled on the pod carries the pod's path, which does
+            # not exist offline and would silently dock the
+            # provenance signal's corpus_on_disk check.
+            c["corpus_path"] = str(state.corpora.get(cycle, ""))
             prepared.append(c)
-        for cand, decision in zip(prepared, gate.evaluate(prepared)):
-            decided.append({**cand, "decision": decision})
+        for start in range(0, len(prepared), LIVE_GROUP_SIZE):
+            chunk = prepared[start:start + LIVE_GROUP_SIZE]
+            for cand, decision in zip(chunk, gate.evaluate(chunk)):
+                decided.append({**cand, "decision": decision})
     return decided
 
 
@@ -281,8 +294,15 @@ def evaluate_pool(state: RunState, candidates: list[dict],
 def _find_adapter_dir(state: RunState, cycle: int) -> Path | None:
     out = state.out
     for cand in (out / "adapters" / f"cycle_{cycle:02d}",
-                 out / f"checkpoint_cycle_{cycle:02d}",
-                 out / "state" / "data" / "model" / "checkpoint"):
+                 out / f"checkpoint_cycle_{cycle:02d}"):
+        if (cand / "adapter_model.safetensors").exists():
+            return cand
+    # The snapshot's checkpoint dir holds only the FINAL cycle's
+    # adapter — using it for any earlier cycle would sample every
+    # cycle from the wrong checkpoint.
+    last_cycle = max(state.corpora) if state.corpora else None
+    if cycle == last_cycle:
+        cand = out / "state" / "data" / "model" / "checkpoint"
         if (cand / "adapter_model.safetensors").exists():
             return cand
     return None
@@ -310,7 +330,7 @@ def _live_generate_fn(state: RunState, cycle: int, corpus_path: Path,
     cfg = OuroConfig()
     cfg.model_dir = model_dir
     if state.params.get("train_model"):
-        cfg.base_model_name = state.params["train_model"]
+        cfg.train_base_model = state.params["train_model"]
     pipeline = OuroPipeline(cfg)
     sim_result = {"corpus_path": str(corpus_path)}
     context = pipeline._load_corpus_context(sim_result)
@@ -448,6 +468,7 @@ def build_report(state: RunState, candidates: list[dict],
             "text_preview": row["text"][:120],
         })
     labelled = tp + fp + fn + tn
+    accepted_total = sum(1 for r in pool_rows if r["accepted"])
     pool = {
         "candidates": len(pool_rows),
         "labelled": labelled,
@@ -455,7 +476,10 @@ def build_report(state: RunState, candidates: list[dict],
         "tp": tp, "fp": fp, "fn": fn, "tn": tn,
         "precision": round(tp / (tp + fp), 4) if tp + fp else None,
         "recall": round(tp / (tp + fn), 4) if tp + fn else None,
-        "accept_rate": round((tp + fp) / len(pool_rows), 4)
+        # Accepted counts directly: unlabelled candidates (no later
+        # corpora, or no salient terms) still have gate decisions and
+        # belong in the accept rate.
+        "accept_rate": round(accepted_total / len(pool_rows), 4)
                        if pool_rows else None,
         "signal_unavailable_rates": _unavailable_rates(
             [r["decision"] for r in decided]),
@@ -471,8 +495,15 @@ def build_report(state: RunState, candidates: list[dict],
         w = (state.params.get("gate") or {}).get("weights") or {}
         if key in w:
             asrun_weights[name] = float(w[key])
+    # Self-check first: rescoring with the as-run weights must
+    # reproduce the logged decisions (0 flips). It is included in the
+    # counterfactual table so a broken rescore cannot hide. Caveat:
+    # logged signal values are rounded to 4 decimals while the gate
+    # scores raw values, so a decision within ~1e-4 of the threshold
+    # could flip spuriously here.
     counterfactual: dict[str, Any] = {}
-    for name, weights in ABLATIONS.items():
+    for name, weights in [("as_run_replay", asrun_weights),
+                          *ABLATIONS.items()]:
         flips_to_accept = flips_to_reject = accepts = 0
         for d in logged:
             now = rescore_decision(d, weights,
@@ -490,6 +521,9 @@ def build_report(state: RunState, candidates: list[dict],
             "flips_to_accept": flips_to_accept,
             "flips_to_reject": flips_to_reject,
         }
+    outcome_all_unavailable = bool(logged) and all(
+        (d.get("signals") or {}).get("outcome_verification", {})
+        .get("status") == "unavailable" for d in logged)
     logged_block = {
         "decisions": len(logged),
         "accept_rate": round(
@@ -498,6 +532,14 @@ def build_report(state: RunState, candidates: list[dict],
         "signal_unavailable_rates": _unavailable_rates(logged),
         "asrun_weights": asrun_weights,
         "counterfactual": counterfactual,
+        # When the outcome signal was UNAVAILABLE for every logged
+        # decision (the normal case for this driver), the no_outcome
+        # ablation is mathematically identical to as-run — its 0
+        # flips are a tautology, not a finding.
+        "note": ("no_outcome is identical to as-run for this run: "
+                 "the outcome signal was UNAVAILABLE for every "
+                 "logged decision")
+                if outcome_all_unavailable else None,
     }
     return {
         "run_out": str(state.out),
@@ -555,6 +597,8 @@ def render_markdown(report: dict) -> str:
             f"(rate {cf['accept_rate']}); flips "
             f"{cf['flips_to_accept']} to accept, "
             f"{cf['flips_to_reject']} to reject vs as-run")
+    if logged.get("note"):
+        lines += ["", f"Note: {logged['note']}."]
     lines.append("")
     return "\n".join(lines)
 

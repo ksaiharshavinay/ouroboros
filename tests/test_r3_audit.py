@@ -74,7 +74,7 @@ def make_fake_run(tmp_path: Path) -> Path:
 # Pool candidates (cycle 0), engineered against the fake corpora:
 #   A/C "zephyr ..."  gate accepts; all salient terms recur later -> TP
 #   B   "zephyr vortex ..." gate accepts; 1/7 terms recur -> FP
-#   D   seed-like, bad provenance; gate rejects; 5/6 terms recur -> FN
+#   D   seed-like, no generator identity; gate rejects; 5/6 recur -> FN
 #   E   degenerate repetition; vetoed; term never recurs -> TN
 POOL = [
     {"cycle": 0, "backend": "local_lora",
@@ -111,6 +111,11 @@ def test_audit_report_hand_computed(tmp_path):
     assert logged["signal_unavailable_rates"]["outcome_verification"] \
         == round(2 / 3, 4)
     cf = logged["counterfactual"]
+    # Self-check: rescoring with the as-run weights must reproduce
+    # the logged decisions exactly.
+    assert cf["as_run_replay"]["accepts"] == 1
+    assert cf["as_run_replay"]["flips_to_accept"] == 0
+    assert cf["as_run_replay"]["flips_to_reject"] == 0
     assert cf["consistency_only"]["accepts"] == 2
     assert cf["consistency_only"]["flips_to_accept"] == 1
     assert cf["consistency_only"]["flips_to_reject"] == 0

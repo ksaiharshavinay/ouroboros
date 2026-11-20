@@ -38,6 +38,15 @@ TURNS_PER_CYCLE = 60
 TURNS_PER_SEED = 12
 ROUNDS_PER_SEED = 10
 SEED_OPENING_CHARS = 1000
+# A recorded turn is capped at this many characters (word boundary).
+# Generation itself samples up to the inference path's 512 tokens,
+# but an uncapped turn would break the training pairs prepare.py
+# builds: the previous turn becomes the prompt and train.py truncates
+# each pair at 512 tokens prompt-first, so a near-512-token prompt
+# leaves a completion with every label masked — nothing to learn
+# from. Simulation turns are short posts; the cap keeps B3 pairs in
+# the same length regime.
+MAX_TURN_CHARS = 1000
 
 
 def seed_opening(seed_text: str, max_chars: int = SEED_OPENING_CHARS) -> str:
@@ -84,6 +93,10 @@ def build_direct_turns(
                 raise RuntimeError(
                     f"B3 direct generation failed at cycle {cycle}, "
                     f"seed {agent_id}, turn {k}: {content[:80]!r}")
+            if len(content) > MAX_TURN_CHARS:
+                cut = content[:MAX_TURN_CHARS]
+                idx = cut.rfind(" ")
+                content = (cut[:idx] if idx > 0 else cut).strip()
             turns.append({
                 "round": (k % rounds) + 1,
                 "agent_id": agent_id,
@@ -91,6 +104,10 @@ def build_direct_turns(
                 "influence": 0.5,
                 "action": "create_post",
             })
+    # Round-major order, agents interleaved — the layout a simulation
+    # corpus has (turns exported in interaction order), so prepare.py's
+    # consecutive-turn pairs mix seed documents the same way.
+    turns.sort(key=lambda t: (t["round"], t["agent_id"]))
     return turns
 
 
@@ -126,15 +143,21 @@ class DirectCheckpointGenerator:
 
     def _ensure_engine(self):
         if self._engine is None:
-            from ouro.infer import OuroInferenceEngine
-            self._engine = OuroInferenceEngine(self.config, self._pipeline)
+            if self._pipeline is not None:
+                # The pipeline's own engine: its checkpoint discovery
+                # (config.model_dir/checkpoint) is the run's.
+                self._engine = self._pipeline.infer
+            else:
+                from ouro.infer import OuroInferenceEngine
+                self._engine = OuroInferenceEngine(self.config)
         return self._engine
 
     def _ensure_base(self):
         if self._base_model is None:
             import torch
             from transformers import AutoModelForCausalLM, AutoTokenizer
-            name = self.config.base_model_name
+            name = getattr(self.config, "train_base_model", None) \
+                or "Qwen/Qwen2.5-0.5B-Instruct"
             self._base_tokenizer = AutoTokenizer.from_pretrained(name)
             if self._base_tokenizer.pad_token is None:
                 self._base_tokenizer.pad_token = \
@@ -147,8 +170,7 @@ class DirectCheckpointGenerator:
         return self._base_model, self._base_tokenizer
 
     def __call__(self, prompt: str) -> str:
-        from ouro.infer import _adapter_checkpoint_dir
-        if _adapter_checkpoint_dir(self.config) is not None:
+        if self._ensure_engine().has_adapter_checkpoint():
             return self._ensure_engine().predict(prompt)
         import torch
         model, tokenizer = self._ensure_base()

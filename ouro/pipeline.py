@@ -76,6 +76,17 @@ class OuroPipeline:
                              write_direct_corpus)
 
         cycle = self.feedback.cycle_count
+        if cycle > 0 and not self.infer.has_adapter_checkpoint():
+            # B3's adapter IS its trajectory state: it generates the
+            # next corpus. A missing adapter here means the resume
+            # restored metadata without weights — generating anyway
+            # would silently produce a base-model corpus and corrupt
+            # the trajectory. (For B3 the driver snapshots the adapter
+            # for exactly this reason.)
+            raise RuntimeError(
+                f"B3 cycle {cycle}: no adapter checkpoint at "
+                f"{self.infer.checkpoint_dir} — refusing to generate "
+                "the corpus from the base model")
         # The human seed documents only: the seeds directory also
         # accumulates feedback_cycle_*.txt from other arms' runs, and
         # B3's conditioning set is exactly the five human documents.

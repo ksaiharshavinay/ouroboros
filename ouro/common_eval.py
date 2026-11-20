@@ -116,7 +116,16 @@ def common_eval_perplexity(
         model = PeftModel.from_pretrained(model, str(adapter_dir))
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model = model.to(device)
-    loss = _eval_nll(model, tokenizer, eval_data, MAX_SEQ_LEN)
+    try:
+        loss = _eval_nll(model, tokenizer, eval_data, MAX_SEQ_LEN)
+    finally:
+        # The driver scores the base model immediately before the
+        # training subprocess starts; without this, the eval model's
+        # GPU allocation stays reserved in the driver process for the
+        # whole training run.
+        del model
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
     return math.exp(loss) if loss == loss and loss < 50 else float("inf")
 
 
