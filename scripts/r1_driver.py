@@ -286,6 +286,12 @@ def stage2() -> None:
     summary = load_summary()
     cycle = pipeline.feedback.cycle_count
     rec = current_cycle_record(summary, cycle)
+    if cycle == 0 and "common_eval_perplexity_base" not in summary:
+        # Base model on the common eval, once, before any training
+        # (R3 §3) — the anchor every trajectory in the grid shares.
+        _score_common_eval(rec, None, base=True)
+        summary["common_eval_perplexity_base"] = \
+            rec["common_eval_perplexity"]
     t0 = time.time()
     pipeline.run_autoresearch()
     rec["stage2_seconds"] = round(time.time() - t0, 1)
@@ -332,6 +338,7 @@ def stage2() -> None:
     frozen_path = REPO / "data/corpus/frozen_eval_groups.json"
     if frozen_path.exists():
         rec["frozen_eval_groups"] = json.loads(frozen_path.read_text())
+    _score_common_eval(rec, str(REPO / "data/model/checkpoint"))
     save_summary(summary)
     log.info("STAGE2 DONE cycle=%d in %.1fs — loss %s -> %s, ppl %s -> %s",
              cycle, rec["stage2_seconds"], rec["train_loss_first"],
@@ -369,6 +376,35 @@ def corpus_metrics(corpus_path: str | None) -> dict:
         "tail_entity_retention": None,
         "ece": None,
     }
+
+
+# ------------------------------------------------------- common eval (R3 §3)
+def _score_common_eval(rec: dict, adapter_dir: str | None,
+                       base: bool = False) -> None:
+    """Score the frozen common eval for the current checkpoint.
+
+    Recorded per cycle as common_eval_perplexity; the base model's
+    value (cycle 0, before any training) is also lifted to the summary
+    top level as common_eval_perplexity_base. If the eval file is
+    absent the field is None with a warning (pre-R3 runs); if it is
+    present, an evaluation failure is fatal — the frozen eval is the
+    metric of record for R3 and a silent None would corrupt it.
+    """
+    from ouro.common_eval import (DEFAULT_COMMON_EVAL_PATH,
+                                  evaluate_common_eval, load_common_eval)
+    if not (REPO / DEFAULT_COMMON_EVAL_PATH).exists():
+        log.warning("stage2: %s not found — common_eval_perplexity "
+                    "recorded as null", DEFAULT_COMMON_EVAL_PATH)
+        rec["common_eval_perplexity"] = None
+        return
+    rows = load_common_eval(REPO / DEFAULT_COMMON_EVAL_PATH)
+    result = evaluate_common_eval(TRAIN_MODEL, adapter_dir,
+                                  REPO / DEFAULT_COMMON_EVAL_PATH)
+    rec["common_eval_perplexity"] = result["common_eval_perplexity"]
+    rec["common_eval_examples"] = result["common_eval_examples"]
+    log.info("stage2: common-eval perplexity %s = %s over %d examples",
+             "base" if base else "trained",
+             result["common_eval_perplexity"], len(rows))
 
 
 # ---------------------------------------------------------------- stage 3
