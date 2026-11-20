@@ -14,6 +14,9 @@ Arm configuration:
   B6:           gate on + a guaranteed real-data anchor (Run Spec R2):
                 prepare.py mixes human-seed examples into the train
                 split at the params' real_fraction of training tokens.
+  Gate config:  optional params["gate"] (Run Spec R3 Tier 2) overrides
+                individual signal weights and/or disables the hard
+                vetoes ("vetoes": false). Absent = the historical gate.
 
 State that must survive a dead runtime lives in OUT (OURO_R1_OUT,
 default /content/r1_run): r1_params.json (written by the notebook),
@@ -60,6 +63,19 @@ TRAIN_MODEL = PARAMS["train_model"]
 VENV_PY = PARAMS["venv_python"]
 REAL_FRACTION = float(PARAMS.get("real_fraction", 0))
 GATE_ENABLED = ARM != "B4"
+# R3 Tier 2 gate configuration (optional; absent = the historical
+# gate, exactly). r1_run.py records only the overrides the operator
+# actually passed under params["gate"]: {"weights": {signal: w},
+# "vetoes": false}.
+_GATE_CFG = PARAMS.get("gate") or {}
+GATE_WEIGHT_OVERRIDES = dict(_GATE_CFG.get("weights") or {})
+GATE_VETOES = bool(_GATE_CFG.get("vetoes", True))
+_GATE_WEIGHT_ATTRS = {
+    "outcome": "gate_weight_outcome",
+    "diversity": "gate_weight_diversity",
+    "consistency": "gate_weight_consistency",
+    "provenance": "gate_weight_provenance",
+}
 
 random.seed(RNG_SEED)
 os.environ.setdefault("PYTHONHASHSEED", str(RNG_SEED))
@@ -95,11 +111,22 @@ PROMPT = "Summarize the key predictions from this cycle."
 
 
 def make_pipeline() -> OuroPipeline:
+    gate_kwargs = {}
+    for key, value in GATE_WEIGHT_OVERRIDES.items():
+        attr = _GATE_WEIGHT_ATTRS.get(key)
+        if attr is None:
+            raise SystemExit(
+                f"r1_params.json gate.weights has unknown signal "
+                f"{key!r} — expected one of {sorted(_GATE_WEIGHT_ATTRS)}")
+        gate_kwargs[attr] = float(value)
+    if not GATE_VETOES:
+        gate_kwargs["gate_vetoes_enabled"] = False
     config = OuroConfig(
         num_agents=NUM_AGENTS,
         simulation_rounds=ROUNDS,
         train_python=VENV_PY,
         feedback_gate_enabled=GATE_ENABLED,
+        **gate_kwargs,
     )
     assert config.allow_stub_simulation is False, "stub must stay OFF"
     assert config.llm_model == "qwen2.5:1.5b", config.llm_model
@@ -123,6 +150,7 @@ def load_summary() -> dict:
         "real_fraction": REAL_FRACTION,
         "swarm_model": "qwen2.5:1.5b",
         "cycles": [],
+        **({"gate_overrides": _GATE_CFG} if _GATE_CFG else {}),
     }
 
 

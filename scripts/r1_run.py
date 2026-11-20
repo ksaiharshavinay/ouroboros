@@ -73,6 +73,21 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--train-steps", type=int, default=48)
     ap.add_argument("--train-model", default="Qwen/Qwen2.5-0.5B-Instruct")
     ap.add_argument("--swarm-model", default="qwen2.5:1.5b")
+    ap.add_argument("--gate-weight-outcome", type=float, default=None,
+                    help="R3 Tier 2: override the gate's delayed-outcome "
+                    "weight (default: the driver's 0.40)")
+    ap.add_argument("--gate-weight-diversity", type=float, default=None,
+                    help="R3 Tier 2: override the gate's diversity "
+                    "weight (default: 0.25)")
+    ap.add_argument("--gate-weight-consistency", type=float, default=None,
+                    help="R3 Tier 2: override the gate's consistency "
+                    "weight (default: 0.20)")
+    ap.add_argument("--gate-weight-provenance", type=float, default=None,
+                    help="R3 Tier 2: override the gate's provenance "
+                    "weight (default: 0.15)")
+    ap.add_argument("--no-gate-vetoes", action="store_true",
+                    help="R3 Tier 2 (G-nv): disable the gate's hard "
+                    "vetoes; Tier 1 runs leave vetoes on")
     ap.add_argument("--venv-python", default=sys.executable,
                     help="interpreter for the driver stages (ML venv)")
     ap.add_argument("--ollama-bin", default="ollama")
@@ -322,7 +337,31 @@ def write_checkpoint_zip(out: Path, cycle: int) -> Path:
 # of the box, not the experiment) may differ.
 _TRAJECTORY_KEYS = ("arm", "rng_seed", "num_agents", "rounds",
                     "train_steps", "train_model", "swarm_model",
-                    "real_fraction")
+                    "real_fraction", "gate")
+
+
+def gate_overrides(args: argparse.Namespace) -> dict:
+    """The optional R3 gate configuration for r1_params.json.
+
+    Empty when nothing was overridden — Tier 1 params carry no "gate"
+    key at all and the driver runs the historical gate exactly. Only
+    the weights actually given are recorded; the driver fills the rest
+    from the gate's own defaults.
+    """
+    weights = {}
+    for cli_name, key in (("gate_weight_outcome", "outcome"),
+                          ("gate_weight_diversity", "diversity"),
+                          ("gate_weight_consistency", "consistency"),
+                          ("gate_weight_provenance", "provenance")):
+        value = getattr(args, cli_name)
+        if value is not None:
+            weights[key] = value
+    gate: dict = {}
+    if weights:
+        gate["weights"] = weights
+    if args.no_gate_vetoes:
+        gate["vetoes"] = False
+    return gate
 
 
 def main() -> None:
@@ -338,6 +377,21 @@ def main() -> None:
             "--arm B6 requires --real-fraction > 0: B6 is the anchored "
             "arm (B5 + a guaranteed real-data fraction); with a 0 "
             "fraction it would silently just be B5")
+    gate_cfg = gate_overrides(args)
+    if gate_cfg:
+        weights = gate_cfg.get("weights", {})
+        if any(v < 0 for v in weights.values()):
+            raise SystemExit(
+                f"gate weights must be >= 0, got {weights}")
+        if weights and sum(weights.values()) <= 0:
+            raise SystemExit(
+                "gate weights must not all be zero — the gate would "
+                "score every candidate 0 and reject everything")
+        if args.arm == "B4":
+            raise SystemExit(
+                "gate overrides are meaningless for --arm B4: its gate "
+                "is disabled (uniform feedback). Gate ablations are "
+                "B5-based (R3 Tier 2).")
     out = args.out.resolve()
     out.mkdir(parents=True, exist_ok=True)
     os.environ["OURO_R1_OUT"] = str(out)
@@ -365,11 +419,14 @@ def main() -> None:
         "swarm_model": args.swarm_model, "venv_python": args.venv_python,
         "real_fraction": args.real_fraction,
     }
+    if gate_cfg:
+        params["gate"] = gate_cfg
     params_path = out / "r1_params.json"
     if params_path.exists():
         existing = json.loads(params_path.read_text())
-        diffs = {k: (existing.get(k), params[k]) for k in _TRAJECTORY_KEYS
-                 if existing.get(k) != params[k]}
+        diffs = {k: (existing.get(k), params.get(k))
+                 for k in _TRAJECTORY_KEYS
+                 if existing.get(k) != params.get(k)}
         if diffs:
             raise SystemExit(
                 f"{params_path} does not match this invocation — "

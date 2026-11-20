@@ -272,7 +272,11 @@ class FeedbackGate:
             ]
 
             veto = None
-            if text.strip().startswith("[Inference error"):
+            if not getattr(cfg, "gate_vetoes_enabled", True):
+                # R3 Tier 2 G-nv ablation: vetoes off — degenerate and
+                # error candidates are scored like everything else.
+                veto = None
+            elif text.strip().startswith("[Inference error"):
                 veto = "inference_error: candidate is an error string, not a prediction"
             elif len(text.strip()) < min_chars:
                 veto = f"too_short: {len(text.strip())} chars < gate_min_chars {min_chars}"

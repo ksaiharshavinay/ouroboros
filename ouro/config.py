@@ -89,6 +89,10 @@ class OuroConfig:
     # than gate_min_chars carries no seedable content.
     gate_min_distinct_ratio: float = 0.35
     gate_min_chars: int = 10
+    # Run Spec R3 Tier 2: hard vetoes can be switched off (the G-nv
+    # ablation) so the vetoes' contribution is measurable. Default on
+    # — Tier 1 behaviour is exactly the historical gate.
+    gate_vetoes_enabled: bool = True
     # Per-candidate decision audit log (JSONL). None -> written next to
     # feedback_state_path as gate_decisions.jsonl.
     gate_log_path: Path | None = None
