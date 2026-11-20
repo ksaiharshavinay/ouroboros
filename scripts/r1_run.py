@@ -18,7 +18,10 @@ Behaviour:
   * after every cycle: driver snapshot + a checkpoint zip in --out with
     the notebook layout (run/ + repo/), so the run can be copied off the
     box or resumed from the zip alone;
-  * per-stage logs land in --out as stage{N}_cycle_{CCCC}.log.
+  * per-stage logs land in --out as stage{N}_cycle_{CCCC}.log;
+  * Run Spec R2: --arm B6 (or B5) with --real-fraction F anchors the
+    train split with human-seed examples at F of training tokens;
+    B6 with a 0 fraction is refused (that would just be B5).
 
 Notes:
   * --no-resume only skips the explicit resume step. The driver's
@@ -55,9 +58,13 @@ DRIVER = REPO / "scripts" / "r1_driver.py"
 
 def parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--arm", choices=["B4", "B5"], required=True)
+    ap.add_argument("--arm", choices=["B4", "B5", "B6"], required=True)
     ap.add_argument("--seed", type=int, required=True,
                     help="rng seed / replicate number (rep N uses seed N)")
+    ap.add_argument("--real-fraction", type=float, default=0,
+                    help="R2 anchor: fraction of training tokens that "
+                    "must be human-seed (real) examples, in [0, 1); "
+                    "required > 0 for --arm B6")
     ap.add_argument("--out", type=Path, required=True,
                     help="output directory (the OURO_R1_OUT equivalent)")
     ap.add_argument("--cycles", type=int, default=5)
@@ -314,12 +321,23 @@ def write_checkpoint_zip(out: Path, cycle: int) -> Path:
 # configurations in one summary — refuse. Only venv_python (a property
 # of the box, not the experiment) may differ.
 _TRAJECTORY_KEYS = ("arm", "rng_seed", "num_agents", "rounds",
-                    "train_steps", "train_model", "swarm_model")
+                    "train_steps", "train_model", "swarm_model",
+                    "real_fraction")
 
 
 def main() -> None:
     global _LOCK_FD
     args = parse_args()
+    if not 0.0 <= args.real_fraction < 1.0:
+        raise SystemExit(
+            f"--real-fraction must be in [0, 1), got "
+            f"{args.real_fraction} (1 would leave no room for any "
+            "simulation tokens in the train split)")
+    if args.arm == "B6" and args.real_fraction <= 0:
+        raise SystemExit(
+            "--arm B6 requires --real-fraction > 0: B6 is the anchored "
+            "arm (B5 + a guaranteed real-data fraction); with a 0 "
+            "fraction it would silently just be B5")
     out = args.out.resolve()
     out.mkdir(parents=True, exist_ok=True)
     os.environ["OURO_R1_OUT"] = str(out)
@@ -345,6 +363,7 @@ def main() -> None:
         "num_agents": args.agents, "rounds": args.rounds,
         "train_steps": args.train_steps, "train_model": args.train_model,
         "swarm_model": args.swarm_model, "venv_python": args.venv_python,
+        "real_fraction": args.real_fraction,
     }
     params_path = out / "r1_params.json"
     if params_path.exists():

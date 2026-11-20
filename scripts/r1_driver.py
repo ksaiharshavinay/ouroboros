@@ -11,6 +11,9 @@ one stage per invocation, mirroring the proven pilot driver:
 Arm configuration:
   B5 (default): feedback_gate_enabled=True  — full multi-signal gate.
   B4:           feedback_gate_enabled=False — uniform feedback ablation.
+  B6:           gate on + a guaranteed real-data anchor (Run Spec R2):
+                prepare.py mixes human-seed examples into the train
+                split at the params' real_fraction of training tokens.
 
 State that must survive a dead runtime lives in OUT (OURO_R1_OUT,
 default /content/r1_run): r1_params.json (written by the notebook),
@@ -55,6 +58,7 @@ ROUNDS = int(PARAMS["rounds"])
 TRAIN_STEPS = int(PARAMS["train_steps"])
 TRAIN_MODEL = PARAMS["train_model"]
 VENV_PY = PARAMS["venv_python"]
+REAL_FRACTION = float(PARAMS.get("real_fraction", 0))
 GATE_ENABLED = ARM != "B4"
 
 random.seed(RNG_SEED)
@@ -116,6 +120,7 @@ def load_summary() -> dict:
         "rounds": ROUNDS,
         "train_steps": TRAIN_STEPS,
         "train_model": TRAIN_MODEL,
+        "real_fraction": REAL_FRACTION,
         "swarm_model": "qwen2.5:1.5b",
         "cycles": [],
     }
@@ -244,6 +249,11 @@ def stage1() -> None:
 def stage2() -> None:
     os.environ["OURO_TRAIN_MAX_STEPS"] = str(TRAIN_STEPS)
     os.environ["OURO_TRAIN_BASE_MODEL"] = TRAIN_MODEL
+    # R2 anchor: prepare.py (a pipeline subprocess, so it inherits this
+    # environment) reads OURO_REAL_FRACTION and mixes human-seed
+    # examples into the train split. Set unconditionally — prepare
+    # treats "0" exactly as unset.
+    os.environ["OURO_REAL_FRACTION"] = str(REAL_FRACTION)
     pipeline = make_pipeline()
     summary = load_summary()
     cycle = pipeline.feedback.cycle_count
@@ -273,6 +283,24 @@ def stage2() -> None:
         "eval_perplexity": meta["eval_perplexity"],
         "adapter_sha256": meta["adapter_sha256"],
     })
+    # R2 anchor accounting, from prepare.py's mixture sidecar. With no
+    # anchor requested the achieved fraction is 0 by construction (real
+    # examples are only ever added by the anchored path).
+    rec["real_fraction_target"] = REAL_FRACTION
+    if REAL_FRACTION > 0:
+        mix_path = REPO / "data/corpus/mixture.json"
+        if mix_path.exists():
+            mix = json.loads(mix_path.read_text())
+            rec["real_fraction_achieved"] = mix.get("achieved_fraction")
+            rec["real_examples_added"] = mix.get("real_examples_added")
+        else:
+            rec["real_fraction_achieved"] = None
+            log.warning(
+                "stage2: real_fraction=%s but %s is missing — prepare "
+                "did not report an achieved fraction", REAL_FRACTION,
+                mix_path)
+    else:
+        rec["real_fraction_achieved"] = 0.0
     frozen_path = REPO / "data/corpus/frozen_eval_groups.json"
     if frozen_path.exists():
         rec["frozen_eval_groups"] = json.loads(frozen_path.read_text())

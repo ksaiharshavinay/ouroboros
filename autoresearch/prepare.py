@@ -16,6 +16,16 @@
 # one source document; round = one temporal slice of that run) — and the
 # split is by GROUP: no group id ever appears in both train and eval.
 # An assertion in main() enforces that invariant on every run.
+#
+# Run Spec R2 (anchoring sweep): with $OURO_REAL_FRACTION set to a float
+# in (0, 1), the TRAIN split — and only the train split — is augmented
+# with examples built from the human seed documents so that real
+# examples account for that fraction of total training tokens (the
+# B6 "anchored accumulation" arm). The split and the eval set are
+# computed exactly as without the variable; real examples are
+# train-only, never enter eval, and carry group ids prefixed
+# "human-seed" so their origin is always accounted. With the variable
+# unset or 0 the outputs are byte-identical to the unanchored path.
 
 from __future__ import annotations
 
@@ -23,19 +33,30 @@ import json
 import logging
 import os
 import random
+import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 CORPUS_DIR = Path("data/corpus")
+SEED_DIR = Path("data/seeds")
 TRAIN_FILE = CORPUS_DIR / "train.jsonl"
 EVAL_FILE = CORPUS_DIR / "eval.jsonl"
+MIXTURE_FILE = CORPUS_DIR / "mixture.json"
 EVAL_SPLIT = 0.1
 # Split seed: fixed by default so splits are reproducible run-to-run;
 # override with $OURO_SPLIT_SEED for split-seed sensitivity checks.
 DEFAULT_SPLIT_SEED = 42
+# Group-id prefix for examples built from the human seed documents.
+REAL_GROUP_PREFIX = "human-seed"
+# Mirror of autoresearch/train.py's MAX_SEQ_LEN: an example's effective
+# training tokens are its prompt+completion tokens truncated to this.
+MAX_SEQ_LEN = 512
+# Mirror of train.py's base-model resolution (env OURO_TRAIN_BASE_MODEL,
+# same default): token counting must use the tokenizer training uses.
+DEFAULT_BASE_MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 
 
 def load_corpus() -> list[dict]:
@@ -86,6 +107,173 @@ def turns_to_training_examples(turns: list[dict]) -> list[dict]:
                 "group": example_group(curr_file, curr.get("round", 0)),
             })
     return examples
+
+
+def seed_documents_to_examples(seed_dir: Path | None = None) -> list[dict]:
+    """
+    Build training examples from the human seed documents (R2 anchor).
+
+    Each document is one source unit — the analogue of one corpus file.
+    A document is far longer than a simulation turn (580–720 tokenizer
+    tokens vs the 512-token training window), and the corpus example
+    format's length unit is the turn, so each document is chunked into
+    its natural paragraph blocks and consecutive blocks are paired
+    exactly as turns_to_training_examples pairs consecutive turns of
+    one file: previous block as prompt context, block as completion.
+    Every resulting example carries the document's group id,
+    "human-seed:<file>", so origin accounting can always separate real
+    examples from simulation ones.
+    """
+    seed_dir = SEED_DIR if seed_dir is None else seed_dir
+    turns: list[dict] = []
+    for path in sorted(seed_dir.glob("seed*.txt")):
+        text = path.read_text(encoding="utf-8")
+        blocks = [b.strip() for b in re.split(r"\n\s*\n", text)]
+        for block in blocks:
+            if block:
+                turns.append({"content": block, "_source_file": path.name})
+    examples = turns_to_training_examples(turns)
+    for ex in examples:
+        ex["group"] = f"{REAL_GROUP_PREFIX}:{ex['source_file']}"
+    return examples
+
+
+def load_base_tokenizer():
+    """The base model's tokenizer — the one train.py tokenises with."""
+    from transformers import AutoTokenizer
+
+    model = os.environ.get("OURO_TRAIN_BASE_MODEL", DEFAULT_BASE_MODEL)
+    return AutoTokenizer.from_pretrained(model)
+
+
+def example_token_count(example: dict, tokenizer) -> int:
+    """Effective training tokens of one example, counted as train.py's
+    dataset builder counts them: prompt tokens (special tokens added)
+    plus completion tokens (none added), the concatenation truncated
+    to MAX_SEQ_LEN."""
+    prompt_ids = tokenizer(
+        example["prompt"], add_special_tokens=True)["input_ids"]
+    completion_ids = tokenizer(
+        example["completion"], add_special_tokens=False)["input_ids"]
+    return min(len(prompt_ids) + len(completion_ids), MAX_SEQ_LEN)
+
+
+def augment_train_with_real(
+    train: list[dict],
+    real_examples: list[dict],
+    target_fraction: float,
+    count_tokens: Callable[[dict], int],
+    seed: int,
+) -> tuple[list[dict], dict]:
+    """
+    Repeat/sample real examples into the train split until they account
+    for `target_fraction` of total training tokens.
+
+    Deterministic for a given seed: real examples are drawn in repeated
+    passes over a pool shuffled by an RNG seeded from the split seed,
+    and the augmented list is shuffled with the same RNG. Examples are
+    indivisible, so the achieved fraction is approximate — after a
+    greedy fill to the target token count, a bounded refinement pass
+    swaps or drops chosen examples whenever doing so lands the
+    achieved fraction closer to the target (this is what keeps the
+    error small when the corpus is small and single examples are a
+    large share of the total).
+
+    Returns (augmented_train, stats). With a non-positive target, an
+    empty train split, or an empty real pool, the train split is
+    returned unchanged and the stats report an achieved fraction of 0.
+    """
+    stats: dict[str, Any] = {
+        "target_fraction": target_fraction,
+        "achieved_fraction": 0.0,
+        "real_examples_added": 0,
+        "real_tokens": 0,
+        "corpus_train_tokens": 0,
+        "total_train_tokens": 0,
+    }
+    if target_fraction <= 0 or not train or not real_examples:
+        return train, stats
+    corpus_tokens = sum(count_tokens(ex) for ex in train)
+    stats["corpus_train_tokens"] = corpus_tokens
+    stats["total_train_tokens"] = corpus_tokens
+    if corpus_tokens <= 0:
+        return train, stats
+
+    needed = target_fraction / (1.0 - target_fraction) * corpus_tokens
+    pool_counts = [count_tokens(ex) for ex in real_examples]
+    rng = random.Random(f"ouro-real-mixture:{seed}")
+    chosen_idx: list[int] = []
+    real_tokens = 0
+    while real_tokens < needed:
+        order = list(range(len(real_examples)))
+        rng.shuffle(order)
+        pass_tokens = 0
+        for j in order:
+            if real_tokens >= needed:
+                break
+            chosen_idx.append(j)
+            real_tokens += pool_counts[j]
+            pass_tokens += pool_counts[j]
+        if pass_tokens <= 0:
+            break  # pool contributes no tokens; cannot approach target
+
+    def _err(rt: int) -> float:
+        return abs(rt / (corpus_tokens + rt) - target_fraction)
+
+    for _ in range(8):  # bounded refinement passes
+        cur_err = _err(real_tokens)
+        improved = False
+        for i in range(len(chosen_idx)):
+            for j in range(len(real_examples)):
+                if j == chosen_idx[i]:
+                    continue
+                new_rt = real_tokens - pool_counts[chosen_idx[i]] \
+                    + pool_counts[j]
+                if new_rt > 0 and _err(new_rt) < cur_err - 1e-12:
+                    chosen_idx[i] = j
+                    real_tokens = new_rt
+                    improved = True
+                    break
+            if improved:
+                break
+        if improved:
+            continue
+        for i in range(len(chosen_idx)):
+            new_rt = real_tokens - pool_counts[chosen_idx[i]]
+            if new_rt > 0 and _err(new_rt) < cur_err - 1e-12:
+                chosen_idx.pop(i)
+                real_tokens = new_rt
+                improved = True
+                break
+        if not improved:
+            break
+
+    chosen = [real_examples[j] for j in chosen_idx]
+    combined = list(train) + chosen
+    rng.shuffle(combined)
+    stats.update({
+        "achieved_fraction": real_tokens / (corpus_tokens + real_tokens),
+        "real_examples_added": len(chosen),
+        "real_tokens": real_tokens,
+        "total_train_tokens": corpus_tokens + real_tokens,
+    })
+    return combined, stats
+
+
+def real_fraction_from_env() -> float:
+    """$OURO_REAL_FRACTION as a float in [0, 1); unset means 0 (off)."""
+    raw = os.environ.get("OURO_REAL_FRACTION", "")
+    if not raw:
+        return 0.0
+    try:
+        value = float(raw)
+    except ValueError:
+        raise SystemExit(
+            f"OURO_REAL_FRACTION must be a float in [0, 1), got {raw!r}")
+    if not 0.0 <= value < 1.0:
+        raise SystemExit(
+            f"OURO_REAL_FRACTION must be a float in [0, 1), got {raw!r}")
+    return value
 
 
 def split_examples(
@@ -178,6 +366,7 @@ def main() -> None:
         return
 
     seed = int(os.environ.get("OURO_SPLIT_SEED", DEFAULT_SPLIT_SEED))
+    target_fraction = real_fraction_from_env()
     examples = turns_to_training_examples(turns)
 
     # Frozen test set: cycle 0's eval groups are written to
@@ -206,6 +395,30 @@ def main() -> None:
                         frozen_ids, len(eval_examples))
 
     assert_no_leakage(train_examples, eval_examples)
+
+    # R2 anchoring: augment the TRAIN split only, after the split and
+    # the leakage assertion, so the eval set and the frozen eval groups
+    # are exactly what the unanchored path computed. The achieved
+    # mixture is written to a sidecar the R1 driver records per cycle;
+    # with the anchor off, any stale sidecar from an earlier anchored
+    # run in this corpus dir is removed so it can never be misread.
+    if target_fraction > 0:
+        tokenizer = load_base_tokenizer()
+        real_examples = seed_documents_to_examples()
+        train_examples, mix = augment_train_with_real(
+            train_examples, real_examples, target_fraction,
+            lambda ex: example_token_count(ex, tokenizer), seed)
+        mix["split_seed"] = seed
+        mix["real_groups"] = sorted({ex["group"] for ex in real_examples})
+        MIXTURE_FILE.write_text(json.dumps(mix, indent=2))
+        logger.info(
+            "Real-data anchor: target %.3f, achieved %.3f "
+            "(%d real examples, %d real tokens of %d train tokens)",
+            mix["target_fraction"], mix["achieved_fraction"],
+            mix["real_examples_added"], mix["real_tokens"],
+            mix["total_train_tokens"])
+    elif MIXTURE_FILE.exists():
+        MIXTURE_FILE.unlink()
 
     n_groups = len({ex["group"] for ex in examples})
     n_eval_groups = len({ex["group"] for ex in eval_examples})
